@@ -14,30 +14,6 @@ WORKERS = 64
 COUNT = 100
 
 
-class TwoLayerNet(torch.nn.Module):
-    def __init__(self, D_in, H, D_out):
-        """
-        In the constructor we instantiate two nn.Linear modules and assign them as
-        member variables.
-        """
-        super(TwoLayerNet, self).__init__()
-        self.linear1 = torch.nn.Linear(D_in, H)
-        self.hidden = torch.nn.Linear(H, H)
-        self.linear2 = torch.nn.Linear(H, D_out)
-
-    def forward(self, x):
-        """
-        In the forward function we accept a Tensor of input data and we must return
-        a Tensor of output data. We can use Modules defined in the constructor as
-        well as arbitrary operators on Tensors.
-        """
-        h_relu = self.linear1(x['x']).clamp(min=0)
-        for _ in range(10):
-            h_relu = self.hidden(h_relu).clamp(min=0)
-        y_pred = self.linear2(h_relu)
-        return y_pred
-
-
 class ConvNet(torch.nn.Module):
     def __init__(self):
         super(ConvNet, self).__init__()
