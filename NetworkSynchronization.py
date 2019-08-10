@@ -12,7 +12,6 @@ Process = mp_ctx.Process
 
 # TESTING Make all multiprocessing stuff threading for debugging purposes
 if DEBUG:
-    from threading import Thread
     Process = Thread
 
 
@@ -41,9 +40,13 @@ class SynchronizationWorker(Thread):
         Parameters
         ----------
         network: torch.nn.Module
-            The network on the main network worker
+            The network on the main network worker.
+        network_index: int
+            The index of the parent network worker.
         network_identity: bytes
-            The identity of this network worker
+            The identity of this network worker.
+        ipc_dir: str
+            Prefix for IPC channels.
         context: zmq.Context
             ZMQ context used in the main network worker.
         """

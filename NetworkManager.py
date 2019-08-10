@@ -11,7 +11,6 @@ from threading import Thread
 
 from NetworkWorker import NetworkWorker
 from NetworkSynchronization import SynchronizationManager, SyncCommands
-from NetworkBackend import forward_response
 from utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional, DEBUG
 
 from torch import multiprocessing
@@ -22,7 +21,6 @@ Process = mp_ctx.Process
 
 # TESTING Make all multiprocessing stuff threading for debugging purposes
 if DEBUG:
-    from threading import Thread
     Process = Thread
 
 
@@ -89,7 +87,8 @@ class NetworkManager:
                  network_args: List = None,
                  network_kwargs: Dict = None,
                  placement: Optional[Union[List[str], Dict[str, int]]] = None,
-                 training_placement: Optional[str] = None):
+                 training_placement: Optional[str] = None,
+                 num_worker_buffers: int = 2):
         """ Primary manager class for creating a distributed prediction cluster.
 
         Notes
@@ -131,6 +130,11 @@ class NetworkManager:
         training_placement: str
             Device name to place the local training network on. Defaults to 'cuda' if
             all of the networks are on the gpu or 'cpu' otherwise.
+        num_worker_buffers: int
+            Number of asynchronous buffers allocated for each worker. More buffers allows for more data to be
+            copying at the same time. However, these buffers take up space. This is most useful to increase when
+            you have a relatively small network with a lot of inputs, meaning you spend most of your time
+            copying data into and out of the network. Default is 2.
         """
         # Temporary directory holding all of the communication objects
         self._ipc_dir_base = TemporaryDirectory()
@@ -138,6 +142,7 @@ class NetworkManager:
 
         # Create the mapping of where to place the worker networks
         self.batch_size = batch_size
+        self.num_worker_buffers = num_worker_buffers
         self.placement = self._create_placement(placement)
         self.training_placement = self._create_training_placement(training_placement)
 
@@ -159,7 +164,7 @@ class NetworkManager:
         self._create_networks()
 
         # Create the management processes
-        self.request_manager = RequestManager(self.batch_size, self.network_identities, self.ipc_dir)
+        self.request_manager = RequestManager(self.batch_size, self.num_networks, self.network_identities, self.ipc_dir)
         self.response_manager = ResponseManager(self.num_networks, self.ipc_dir)
         self.synchronization_manager = SynchronizationManager(self.ipc_dir)
 
@@ -194,7 +199,7 @@ class NetworkManager:
             for _ in range(count):
                 network = NetworkWorker(self.num_networks, device, self.network_config)
                 self.networks.append(network)
-                self.network_identities.append(network.network_identity)
+                self.network_identities.extend(network.request_worker_identities)
                 self.num_networks += 1
 
     def __del__(self):
@@ -220,6 +225,7 @@ class NetworkManager:
             "network_args": self.network_args,
             "network_kwargs": self.network_kwargs,
             "ipc_dir": self.ipc_dir,
+            "num_worker_buffers": self.num_worker_buffers,
             "request_channel": relative_channel(RequestManager.BACKEND_CHANNEL, self.ipc_dir),
             "response_channel": relative_channel(ResponseManager.BACKEND_CHANNEL, self.ipc_dir),
             "ready_channel": relative_channel(RequestManager.INTERCOMMUNICATION_CHANNEL, self.ipc_dir)
@@ -341,8 +347,8 @@ class NetworkManager:
         for network in self.networks:
             network.start()
 
-        for network, identity in zip(self.networks, self.network_identities):
-            printer("Starting Network {} on {}".format(identity, network.device))
+        for network in self.networks:
+            printer("Starting Network {} on {}".format(network.identity, network.device))
             network.ready.wait()
 
         printer("Starting Local Network")
@@ -394,37 +400,18 @@ class RequestManager(Process):
     # Command to shutdown all network workers
     SHUTDOWN = b'SHUTDOWN'
 
-    def __init__(self, batch_size: int, network_identities: List[bytes], ipc_dir: str):
+    def __init__(self, batch_size: int, num_networks: int, network_identities: List[bytes], ipc_dir: str):
         super(RequestManager, self).__init__()
 
         self.batch_size = batch_size
         self.network_identities = network_identities
-        self.num_networks = len(network_identities)
+        self.num_networks = num_networks
         self.ipc_dir = ipc_dir
         self.ready = mp_ctx.Event()
 
-    @staticmethod
-    def request_sender_thread(context: zmq.Context, backend, network_queue):
-        request_queue = context.socket(zmq.PULL)
-        request_queue.connect(RequestManager.SENDER_CHANNEL)
-
-        while True:
-            # Wait for a ready batch
-            request = request_queue.recv()
-
-            if len(request) == 0:
-                break
-
-            # Wait for an available network
-            network = network_queue.recv()
-
-            # Send the batched request
-            backend.send_multipart([network, request])
-
-    def _shutdown(self, backend: zmq.Socket, request_queue):
+    def _shutdown(self, backend: zmq.Socket):
         for network in self.network_identities:
-            backend.send_multipart([network, NetworkWorker.SHUTDOWN])
-        request_queue.send(b'')
+            backend.send_multipart([network, pickle.dumps([NetworkWorker.SHUTDOWN])])
 
     def run(self) -> None:
         context = zmq.Context()
@@ -448,14 +435,6 @@ class RequestManager(Process):
         poller = zmq.Poller()
         poller.register(frontend, zmq.POLLIN)
 
-        # EXPERIMENTAL Simple Push channel for sending the for batch for the network
-        request_queue = context.socket(zmq.PUSH)
-        request_queue.bind(self.SENDER_CHANNEL)
-
-        # EXPERIMENTAL Create the request sending thread
-        request_sender = Thread(target=self.request_sender_thread, args=[context, backend, network_queue])
-        request_sender.start()
-
         # We are ready for connections
         self.ready.set()
 
@@ -464,28 +443,28 @@ class RequestManager(Process):
         carry_over = None
 
         while True:
-            timeout = None
+            flags = 0
             current_size = 0
             current_batch.clear()
 
             # If we had data from the last batch, add it to the beginning of the current batch
             if carry_over is not None:
-                timeout = 0
-                current_size = carry_over[1]
+                flags = zmq.NOBLOCK
+                current_size = deserialize_int(carry_over[1])
                 current_batch.extend(carry_over)
-
                 carry_over = None
 
-            # Wait for requests or see if we have any more requests
-            num_requests = len(poller.poll(timeout))
-
             # Add all requests up to batch size to current prediction
-            for _ in range(num_requests):
-                request = frontend.recv_multipart(flags=zmq.NOBLOCK)
+            while True:
+                try:
+                    request = frontend.recv_multipart(flags=flags)
+                    flags = zmq.NOBLOCK
+                except zmq.ZMQError:
+                    break
 
                 # Shutdown event is just a size one request
                 if len(request) == 1:
-                    self._shutdown(backend, request_queue)
+                    self._shutdown(backend)
                     return
 
                 size = deserialize_int(request[1])
@@ -501,14 +480,11 @@ class RequestManager(Process):
                     current_size = new_size
                     current_batch.extend(request)
 
-            # EXPERIMENTAL ASYNCHRONOUS LOAD BALANCING
-            request_queue.send(pickle.dumps(current_batch))
-
             # Wait for an available network
-            # network = network_queue.recv()
+            network = network_queue.recv()
 
             # Send the request
-            # backend.send_multipart([network, pickle.dumps(current_batch)])
+            backend.send_multipart([network, pickle.dumps(current_batch)])
 
 
 class ResponseManager(Process):
@@ -538,7 +514,6 @@ class ResponseManager(Process):
         # We are ready for connections
         self.ready.set()
 
-        forward_response(backend, frontend)
-        # while True:
-        #     response = backend.recv_multipart()
-        #     frontend.send_multipart(response)
+        while True:
+            response = backend.recv_multipart()
+            frontend.send_multipart(response)

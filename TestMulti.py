@@ -1,15 +1,17 @@
 import torch
 from torch import nn, multiprocessing
 from torch.nn import functional as F
-from torch.multiprocessing.reductions import ForkingPickler
 
 import NetworkManager
 import NetworkClient
 from time import time, sleep
 
+from multiprocessing import Value
+import ctypes
 
-BATCH_SIZE = 16
-WORKERS = 64
+
+BATCH_SIZE = 32
+WORKERS = 256
 COUNT = 100
 
 
@@ -41,11 +43,12 @@ class ConvNet(torch.nn.Module):
     def __init__(self):
         super(ConvNet, self).__init__()
 
-        self.conv1 = nn.Conv2d(3, 32, 7)
-        self.conv2 = nn.Conv2d(32, 128, 5)
-        self.conv3 = nn.Conv2d(128, 256, 3)
+        self.conv1 = nn.Conv2d(3, 32, 7, 2)
+        self.conv2 = nn.Conv2d(32, 64, 5, 2)
+        self.conv3 = nn.Conv2d(64, 128, 3, 2)
+        self.conv4 = nn.Conv2d(128, 256, 3, 2)
 
-        self.output1 = nn.Linear(4 * 4 * 256, 256)
+        self.output1 = nn.Linear(1024, 256)
         self.output2 = nn.Linear(256, 256)
         self.output3 = nn.Linear(256, 1)
 
@@ -57,6 +60,9 @@ class ConvNet(torch.nn.Module):
         y = F.relu(y)
 
         y = self.conv3(y)
+        y = F.relu(y)
+
+        y = self.conv4(y)
         y = F.relu(y)
 
         y = y.view(y.size(0), -1)
@@ -76,18 +82,20 @@ class TestWorker(torch.multiprocessing.Process):
 
         self.ready = torch.multiprocessing.Event()
         self.start_event = torch.multiprocessing.Event()
+        self.time = Value(ctypes.c_double, lock=False)
 
     def run(self):
-        client = NetworkClient.NetworkClient(self.config, 1)
-        client.register()
+        with NetworkClient.NetworkClient(self.config, 1) as client:
+            self.ready.set()
 
-        self.ready.set()
+            self.start_event.wait()
+            self.start_event.clear()
 
-        self.start_event.wait()
-        self.start_event.clear()
-
-        for _ in range(self.count):
-            client.predict_inplace()
+            t0 = time()
+            for _ in range(self.count):
+                client.predict_inplace()
+            t1 = time()
+            self.time.value = t1 - t0
 
         self.ready.set()
 
@@ -101,7 +109,7 @@ if __name__ == '__main__':
     output_shape = (1, )
     output_type = torch.float32
 
-    input_shape = (3, 16, 16)
+    input_shape = (3, 64, 64)
     input_type = torch.float32
 
     try:
@@ -109,8 +117,11 @@ if __name__ == '__main__':
     except ValueError:
         placement = {'cpu': 4}
 
+    # placement = {'cpu': 4}
+    # device = 'cpu'
+
     manager = NetworkManager.NetworkManager(input_shape, input_type, output_shape, output_type, BATCH_SIZE,
-                                            ConvNet, placement=placement)
+                                            ConvNet, placement=placement, num_worker_buffers=2)
     with manager:
         workers = [TestWorker(manager.client_config, COUNT) for _ in range(WORKERS)]
 
@@ -122,20 +133,24 @@ if __name__ == '__main__':
 
         sleep(3)
 
-        t0 = time()
+        average_time = 0
+
         for worker in workers:
             worker.ready.clear()
             worker.start_event.set()
 
         for worker in workers:
             worker.ready.wait()
+            average_time += worker.time.value
             worker.join()
-        t1 = time()
-        print(f"Remote Time: {t1 - t0}")
 
-        x = torch.rand(1, *input_shape)
+        print(f"Remote Time: {average_time / WORKERS}")
+
         t0 = time()
-        for _ in range(COUNT * WORKERS):
-            manager._local_network(x.to(device))
+        with torch.no_grad():
+            for _ in range(COUNT * WORKERS):
+                x = torch.rand(1, *input_shape)
+                y = manager._local_network(x.to(device))
+                y = y.cpu()
         t1 = time()
         print(f"Local Time: {t1 - t0}")

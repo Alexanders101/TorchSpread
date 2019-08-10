@@ -9,15 +9,12 @@ from NetworkSynchronization import SyncCommands, SynchronizationManager, relativ
 
 
 class NetworkClient:
-    def __init__(self, config: Dict, batch_size: int, device=None):
+    def __init__(self, config: Dict, batch_size: int):
         assert batch_size <= config['batch_size'], "Client batch size is greater than manager batch size."
 
         self.config = config
         self.ipc_dir = config['ipc_dir']
-
-        self.device = optional(device, 'shared')
-        if 'cpu' in self.device:
-            self.device = 'shared'
+        self.device = 'shared'
 
         # Create this client's buffers
         self.batch_size = batch_size

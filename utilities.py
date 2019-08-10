@@ -75,7 +75,7 @@ def make_buffer(buffer_size, buffer_shape, buffer_type, device='shared'):
         tensor = torch.empty((buffer_size, *buffer_shape), dtype=buffer_type)
         if device == 'shared':
             return tensor.share_memory_()
-        elif device == 'pinned':
+        elif device == 'pin':
             return tensor.pin_memory()
         else:
             return tensor.to(device)
@@ -115,7 +115,16 @@ def slice_buffer(buffer, begin=0, end=-1):
     elif isinstance(buffer, list):
         return [slice_buffer(val, begin, end) for val in buffer]
     else:
-        return buffer[begin:end]
+        return buffer[:end]
+
+
+def send_buffer(buffer, device):
+    if isinstance(buffer, dict):
+        return {key: send_buffer(val, device) for key, val in buffer.items()}
+    elif isinstance(buffer, list):
+        return [send_buffer(val, device) for val in buffer]
+    else:
+        return buffer.to(device)
 
 def send_sigkill(pid):
     os.kill(pid, signal.SIGKILL)

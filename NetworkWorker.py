@@ -6,145 +6,93 @@ from typing import Dict, List, Tuple
 import zmq
 import pickle
 from threading import Thread, Event
-from copy import deepcopy
 
 from NetworkSynchronization import SynchronizationWorker
 from utilities import make_buffer, load_buffer, unload_buffer, DEBUG, VERBOSE
-from utilities import serialize_int, deserialize_int, iterate_window, slice_buffer
+from utilities import serialize_int, deserialize_int, iterate_window, slice_buffer, send_buffer
 
 mp_ctx = multiprocessing.get_context('forkserver')
 Process = mp_ctx.Process
 
 # TESTING Make all multiprocessing stuff threading for debugging purposes
 if DEBUG:
-    from threading import Thread
     Process = Thread
 
 # TESTING Print all communication
 debug_print = print if VERBOSE else (lambda x: x)
 
 
-class NetworkWorkerRequester(Thread):
-    REQUESTER_CHANNEL = "inproc://REQUESTER"
-    INTERNAL_CHANNEL = "inproc://REQUESTER_INTERNAL"
+class RequestWorker(Thread):
+    WORKER_REQUEST_CHANNEL = "inproc://REQUEST"
 
-    def __init__(self,
-                 input_buffers: Dict[str, object],
-                 network_inputs: List[object],
-                 network_requests: List[List[Tuple]],
-                 network_identity: bytes,
-                 request_channel: str,
-                 context: zmq.Context):
-        super(NetworkWorkerRequester, self).__init__()
+    def __init__(self, index: int, identity: bytes, client_input_buffers: Dict[str, object],
+                 batch_input_buffers: List[object], network_input_buffers: List[object],
+                 network_requests: List[List[Tuple]], gpu: bool, request_channel: str, context: zmq.Context):
+        super(RequestWorker, self).__init__()
 
         # Local storage
-        self.input_buffers = input_buffers
-        self.network_inputs = network_inputs
-        self.num_inputs = len(network_inputs)
+        self.client_input_buffers = client_input_buffers
+        self.batch_input_buffer = batch_input_buffers[index]
+        self.network_input_buffer = network_input_buffers[index]
         self.network_requests = network_requests
-        self.network_identity = network_identity
         self.context = context
+        self.gpu = gpu
 
-        # Receive requests from the request manager and batch them for the network
+        self.index = index
+        self.identity = identity
+
+        # Receive requests from the request manager and copy them to the network buffer
         # RequestManager -> Batch -> [WorkerRequester]
         self.request_queue: zmq.Socket = context.socket(zmq.DEALER)
-        self.request_queue.setsockopt(zmq.IDENTITY, network_identity)
+        self.request_queue.setsockopt(zmq.IDENTITY, self.identity)
         self.request_queue.connect(request_channel)
 
         # Inform the network that there is a ready batch in a given input buffer
         # [WorkerRequester] -> Predict Request -> Worker
         self.predict_queue = context.socket(zmq.PUSH)
-        self.predict_queue.bind(self.INTERNAL_CHANNEL)
+        self.predict_queue.connect(self.WORKER_REQUEST_CHANNEL)
 
         self.ready = Event()
 
-    def loader_thread(self, input_index: int, ready: Event):
-        """ Asynchronous data loading.
+    def run(self):
+        request_index = self.index
 
-        This is especially helpful when we have a small network, large input, and a large number of clients.
-        This makes the copying of the predictions into the network buffer parallel.
-        """
-        # NetworkWorkerRequester -> Request -> [loader_thread]
-        request_queue = self.context.socket(zmq.PULL)
-        request_queue.connect(self.INTERNAL_CHANNEL)
-
-        # [loader_thread] -> Request -> NetworkWorker
-        predict_queue = self.context.socket(zmq.PUSH)
-        predict_queue.connect(self.REQUESTER_CHANNEL)
-
-        # Current loader's appropriate input
-        network_input = self.network_inputs[input_index]
-
-        # Ready for requests
-        ready.set()
+        # Ready for commands
+        self.ready.set()
 
         while True:
             # Current Buffers
             network_request = []
 
             # Wait for new requests
-            request = pickle.loads(request_queue.recv())
-            debug_print("Requester {}: Loader {} received request.".format(self.network_identity, input_index))
+            client_requests = pickle.loads(self.request_queue.recv())
+            debug_print("Loader {} received request.".format(self.identity))
 
-            # Kill Signal for the worker is a single length request
-            if len(request) < 2:
-                debug_print("Requester {}: Loader {} Shutdown.".format(self.network_identity, input_index))
+            # KILL SIGNAL: length 1 request
+            if len(client_requests) < 2:
+                debug_print("Loader {} Shutdown.".format(self.identity))
                 break
 
             # Transfer data to the network's input buffer
             current_size = 0
-            for client, size in iterate_window(request, n=2):
+            for client, size in iterate_window(client_requests, n=2):
                 size = deserialize_int(size)
 
-                load_buffer(network_input, self.input_buffers[client], size, current_size)
+                load_buffer(self.batch_input_buffer, self.client_input_buffers[client], size, current_size)
                 network_request.append((client, size, current_size))
 
                 current_size += size
 
-            # Send request to network and move on to next buffer
-            self.network_requests[input_index] = network_request
-            predict_queue.send_multipart([serialize_int(input_index), serialize_int(current_size)])
+            if self.gpu:
+                load_buffer(self.network_input_buffer, self.batch_input_buffer, current_size, 0)
 
-        # Pass kill event to network worker. Only the first loader does this.
-        if input_index == 0:
-            predict_queue.send(serialize_int(0))
+            # Send request to network
+            self.network_requests[request_index] = network_request
+            self.predict_queue.send_multipart([serialize_int(request_index), serialize_int(current_size)])
 
-    def _shutdown_predictor(self):
-        for _ in range(self.num_inputs):
-            self.predict_queue.send(pickle.dumps([NetworkWorker.SHUTDOWN]))
-
-    def run(self):
-        # Local variables for faster access mid-loop
-        request_queue = self.request_queue
-        predict_queue = self.predict_queue
-
-        # Start all of the loader threads
-        loader_threads = []
-        for loader_index in range(self.num_inputs):
-            loader_ready = Event()
-            loader_thread = Thread(target=self.loader_thread, args=(loader_index, loader_ready))
-
-            loader_thread.start()
-            loader_ready.wait()
-
-            loader_threads.append(loader_thread)
-
-        # Ready for commands
-        self.ready.set()
-        current_loader = 0
-
-        while True:
-            request = request_queue.recv()
-            debug_print("Requester {} received request.".format(self.network_identity))
-
-            # Kill Switch
-            if len(request) <= 1:
-                debug_print("Requester {} Shutdown.".format(self.network_identity))
-                self._shutdown_predictor()
-                break
-            else:
-                predict_queue.send_multipart([serialize_int(current_loader), request])
-                current_loader = (current_loader + 1) % self.num_inputs
+        # Pass kill event to network worker. Only the first requester does this.
+        if request_index == 0:
+            self.predict_queue.send_multipart([serialize_int(0), serialize_int(0)])
 
 
 class NetworkWorker(Process):
@@ -152,29 +100,70 @@ class NetworkWorker(Process):
     READY = b"R"
     SHUTDOWN = b"S"
 
-    def __init__(self, network_index: int, device: str, config: Dict[str, object]):
+    def __init__(self, index: int, device: str, config: Dict[str, object]):
         super(NetworkWorker, self).__init__()
-        self.network_index = network_index
-        self.network_identity = b"N" + serialize_int(self.network_index)
+        self.num_buffers = config["num_worker_buffers"]
+
+        self.index = index
+        self.identity = b"N" + serialize_int(self.index)
+        self.request_worker_identities = [self.identity + serialize_int(i) for i in range(self.num_buffers)]
 
         self.config = config
         self.device = device
+        self.gpu = 'cuda' in device
         self.ready = mp_ctx.Event()
 
-        self.num_inputs = 2
+    def _start_synchronization_thread(self, network, context):
+        ipc_dir = self.config['ipc_dir']
+        synchronization_thread = SynchronizationWorker(network, self.index, self.identity, ipc_dir, context)
+        synchronization_thread.start()
+        synchronization_thread.ready.wait()
+        return synchronization_thread
+
+    def _start_request_threads(self, batch_input_buffers, network_input_buffers, network_requests, client_input_buffers, context):
+        request_channel = self.config["request_channel"]
+        request_threads = []
+        for i in range(self.num_buffers):
+            request_thread = RequestWorker(i, self.request_worker_identities[i], client_input_buffers,
+                                           batch_input_buffers, network_input_buffers, network_requests,
+                                           self.gpu, request_channel, context)
+            request_thread.start()
+            request_thread.ready.wait()
+
+            request_threads.append(request_thread)
+        return request_threads
+
+    def _start_response_threads(self, client_output_buffers, context):
+        response_channel = self.config["response_channel"]
+        response_threads = []
+        for i in range(self.num_buffers):
+            thread = ResponseWorker(i, self.device, client_output_buffers, response_channel, context)
+            thread.start()
+            thread.ready.wait()
+            response_threads.append(thread)
+        return response_threads
 
     def run(self) -> None:
         config: Dict = self.config
         device = torch.device(self.device)
-        if 'cuda' in self.device:
+        if self.gpu:
             torch.cuda.set_device(device)
 
         # Network Setup
         # ########################################################################################
         # Create buffers
-        network_requests = [[] for _ in range(self.num_inputs)]
-        network_inputs = [make_buffer(config["batch_size"], config["input_shape"], config["input_type"], device)
-                          for _ in range(self.num_inputs)]
+        network_requests = [[] for _ in range(self.num_buffers)]
+
+        # The tensors that are fed into the network
+        network_input_buffers = [make_buffer(config["batch_size"], config["input_shape"], config["input_type"], device)
+                                 for _ in range(self.num_buffers)]
+
+        # The tensors that the predictions are batched inside of
+        if self.gpu:
+            batch_input_buffers = [make_buffer(config["batch_size"], config["input_shape"], config["input_type"], 'pin')
+                                   for _ in range(self.num_buffers)]
+        else:
+            batch_input_buffers = network_input_buffers
 
         # Initialize local copy of the network
         network = config['network_class'](*config["network_args"], **config["network_kwargs"])
@@ -187,103 +176,83 @@ class NetworkWorker(Process):
         # Get batched request from the requester
         # NetworkWorkerRequester -> Predict Request -> [NetworkWorker]
         request_queue: zmq.Socket = context.socket(zmq.PULL)
-        request_queue.bind(NetworkWorkerRequester.REQUESTER_CHANNEL)
+        request_queue.bind(RequestWorker.WORKER_REQUEST_CHANNEL)
 
         # Inform the Request Manager that this network is ready for more data
         # [NetworkWorker] -> Ready Command -> RequestManager
         ready_queue: zmq.Socket = context.socket(zmq.PUSH)
         ready_queue.connect(config["ready_channel"])
 
-        # Send the finished jobs to the responders
-        # [NetworkWorker] -> Finished Batch -> NetworkWorkerResponder
-        response_queues = []
-        for i in range(self.num_inputs):
-            queue = context.socket(zmq.PAIR)
-            queue.bind(NetworkWorkerResponder.RESPONDER_CHANNEL + str(i))
-            response_queues.append(queue)
-
         # Worker Setup
         # ########################################################################################
-        # Synchronization thread
-        synchronization_thread = SynchronizationWorker(network, self.network_index, self.network_identity,
-                                                       config['ipc_dir'], context)
-        synchronization_thread.start()
-        synchronization_thread.ready.wait()
+        synchronization_thread = self._start_synchronization_thread(network, context)
         network_lock = synchronization_thread.network_lock
 
-        # Request Thread
-        request_thread = NetworkWorkerRequester(synchronization_thread.input_buffers, network_inputs, network_requests,
-                                                self.network_identity, config["request_channel"], context)
-        request_thread.start()
-        request_thread.ready.wait()
+        request_threads = self._start_request_threads(batch_input_buffers, network_input_buffers, network_requests,
+                                                      synchronization_thread.input_buffers, context)
 
-        # Response Threads
-        response_threads = []
-        for i in range(self.num_inputs):
-            thread = NetworkWorkerResponder(i, synchronization_thread.output_buffers, self.device,
-                                            config["response_channel"], context)
-            thread.start()
-            thread.ready.wait()
-            response_threads.append(thread)
+        response_threads = self._start_response_threads(synchronization_thread.output_buffers, context)
 
         # Main Loop
         # ########################################################################################
-        # Inform the manager that this network is ready
         self.ready.set()
-        for _ in range(self.num_inputs):
-            ready_queue.send(self.network_identity, flags=zmq.NOBLOCK)
+        for thread in request_threads:
+            ready_queue.send(thread.identity, flags=zmq.NOBLOCK)
 
-        current_buffer = 0
         while True:
-            current_size = deserialize_int(request_queue.recv())
-            debug_print("Network {} received request of size {}".format(self.network_identity, current_size))
+            request_index, request_size = map(deserialize_int, request_queue.recv_multipart())
+            debug_print("Network {} received request of size {}".format(self.identity, request_size))
 
-            # Kill signal is a zero prediction size
-            if current_size < 1:
-                debug_print("Network {} Shutdown".format(self.network_identity))
+            # KILL SIGNAL: zero request size
+            if request_size < 1:
+                debug_print("Network {} Shutdown".format(self.identity))
                 break
 
-            network_input = network_inputs[current_buffer]
-            network_request = deepcopy(network_requests[current_buffer])
+            # Get the current data
+            network_input = network_input_buffers[request_index]
+            network_request = network_requests[request_index]
 
             # Predict on the data
             with network_lock:
                 with torch.no_grad():
-                    network_output = network(slice_buffer(network_input, 0, current_size))
-                    # network_output = network(network_input[:current_size])
+                    network_output = network(slice_buffer(network_input, 0, request_size))
 
             # Inform the Request Manager that we are ready for more requests
-            ready_queue.send(self.network_identity, flags=zmq.NOBLOCK)
-
-            debug_print("Network {} has finished its prediction.".format(self.network_identity))
+            ready_queue.send(request_threads[request_index].identity, flags=zmq.NOBLOCK)
+            debug_print("Network {} has finished its prediction.".format(self.identity))
 
             # Send the responses back to the clients
-            # response_thread.respond(response_queue, network_request, network_output)
-            response_threads[current_buffer].respond(response_queues[current_buffer], network_request, network_output)
-            current_buffer = (current_buffer + 1) % self.num_inputs
+            response_threads[request_index].respond(network_request, network_output)
 
-        # Cleanup
-        for thread, queue in zip(response_threads, response_queues):
-            thread.shutdown(queue)
+        # Cleanup after ending
+        for thread in response_threads:
+            thread.shutdown()
             thread.join()
-        request_thread.join()
+
+        for thread in request_threads:
+            thread.join()
+
         synchronization_thread.join()
 
 
-class NetworkWorkerResponder(Thread):
-    RESPONDER_CHANNEL = "inproc://RESPONDER"
+class ResponseWorker(Thread):
+    WORKER_RESPONSE_CHANNEL = "inproc://RESPONSE"
 
-    def __init__(self, index: int, output_buffers: Dict[str, object], device: str,
-                 response_channel: str, context: zmq.Context):
+    def __init__(self,
+                 index: int,
+                 device: str,
+                 client_output_buffers: Dict[str, object],
+                 response_channel: str,
+                 context: zmq.Context):
         """ Asynchronous thread for sending out responses to the clients informing them that their prediction
             is finished. This is faster than doing it in the main thread since the network is free while the
             responses are being sent out.
 
         """
-        super(NetworkWorkerResponder, self).__init__()
+        super(ResponseWorker, self).__init__()
 
         # Local Storage
-        self.output_buffers = output_buffers
+        self.client_output_buffers = client_output_buffers
         self.device = device
         self.index = index
         self.gpu = 'cuda' in self.device
@@ -292,10 +261,13 @@ class NetworkWorkerResponder(Thread):
         self.response_queue: zmq.Socket = context.socket(zmq.PUSH)
         self.response_queue.connect(response_channel)
 
-        # NetworkWorker -> Done Command -> [NetworkWorkerResponder]
         # [NetworkWorkerResponder] -> Ready Command -> NetworkWorker
         self.request_queue: zmq.Socket = context.socket(zmq.PAIR)
-        self.request_queue.connect(self.RESPONDER_CHANNEL + str(index))
+        self.request_queue.bind(self.WORKER_RESPONSE_CHANNEL + str(index))
+
+        # NetworkWorker -> Done Command -> [NetworkWorkerResponder]
+        self.worker_queue: zmq.Socket = context.socket(zmq.PAIR)
+        self.worker_queue.connect(self.WORKER_RESPONSE_CHANNEL + str(index))
 
         # Variables for storing response
         self.network_request = None
@@ -303,17 +275,17 @@ class NetworkWorkerResponder(Thread):
 
         self.ready = Event()
 
-    def respond(self, response_queue: zmq.Socket, network_request: List[Tuple], network_output: torch.Tensor):
+    def respond(self, network_request: List[Tuple], network_output: torch.Tensor):
         """ Respond to a new set of clients. """
-        response_queue.recv()
+        self.worker_queue.recv()
         self.network_request = network_request
         self.network_output = network_output
-        response_queue.send(b'')
+        self.worker_queue.send(b'')
 
-    def shutdown(self, response_queue: zmq.Socket):
+    def shutdown(self):
         """ Stop this thread. """
-        response_queue.recv()
-        response_queue.send(b'KILL')
+        self.worker_queue.recv()
+        self.worker_queue.send(b'KILL')
 
     def run(self):
         self.request_queue.send(b'')
@@ -324,25 +296,19 @@ class NetworkWorkerResponder(Thread):
             command = self.request_queue.recv()
             debug_print("Responder {} for {} received response.".format(self.index, self.device))
 
-            # Kill Switch
+            # KILL SWITCH: Non-empty command
             if len(command) > 1:
                 debug_print("Responder {} for {} Shutdown.".format(self.index, self.device))
                 break
 
+            # Transfer output to CPU as a batch for efficiency
+            self.network_output = send_buffer(self.network_output, 'cpu')
+
             # Copy the results to the output buffers
             # And inform the client that their request is complete
-            if self.gpu and False:
-                for client, size, index in self.network_request:
-                    unload_buffer(self.output_buffers[client], self.network_output, size, index)
-
-                # torch.cuda.synchronize()
-
-                for client, _, _ in self.network_request:
-                    self.response_queue.send_multipart([client, b'DONE'])
-            else:
-                for client, size, index in self.network_request:
-                    unload_buffer(self.output_buffers[client], self.network_output, size, index)
-                    self.response_queue.send_multipart([client, b'DONE'])
+            for client, size, index in self.network_request:
+                unload_buffer(self.client_output_buffers[client], self.network_output, size, index)
+                self.response_queue.send_multipart([client, b'DONE'])
 
             # Ready for more
             self.request_queue.send(b'')
