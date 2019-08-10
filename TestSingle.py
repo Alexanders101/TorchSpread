@@ -40,30 +40,22 @@ if __name__ == '__main__':
     input_shape = (8,)
     input_type = torch.float32
 
-    manager = NetworkManager.NetworkManager(TwoLayerNet, input_shape, input_type, output_shape, output_type, D_in=8,
-                                            H=32, D_out=3, batch_size=1024)
+    manager = NetworkManager.NetworkManager(TwoLayerNet, input_shape, input_type, output_shape, output_type,
+                                            network_args=[8, 32, 3], batch_size=1024)
     manager.start()
 
-    from utilities import serialize_tensor, serialize_int
+    client = NetworkClient.NetworkClient(manager.client_config, 1024)
+    client.register()
 
-    client = NetworkClient.NetworkClient(manager, 1024)
+    client.predict_inplace(1024)
 
-    client.synchronization_response.send_multipart(
-        [b'R', serialize_tensor([client.input_buffer, client.output_buffer])])
-    network, identity = client.synchronization_response.recv_multipart()
-
-    client.response_queue.setsockopt(zmq.IDENTITY, identity)
-    client.synchronization_response.setsockopt(zmq.IDENTITY, identity)
-    client.request_queue.connect(RequestManager.FRONTEND_CHANNEL)
-    client.response_queue.connect(ResponseManager.FRONTEND_CHANNEL)
-
-    N = 1_000
-    t0 = time()
-    for i in range(N):
-        client.request_queue.send_multipart([identity, serialize_int(1024)])
-        client.response_queue.recv()
-    t1 = time()
-    print(f"Average Time Remote: {1000 * (t1 - t0) / N} ms")
+    # N = 1_000
+    # t0 = time()
+    # for i in range(N):
+    #     client.request_queue.send_multipart([identity, serialize_int(1024)])
+    #     client.response_queue.recv()
+    # t1 = time()
+    # print(f"Average Time Remote: {1000 * (t1 - t0) / N} ms")
 
     manager.shutdown()
 

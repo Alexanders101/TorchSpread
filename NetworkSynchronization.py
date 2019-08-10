@@ -1,11 +1,19 @@
 import torch
 import zmq
+import pickle
 
 from torch import multiprocessing, nn
-from torch.multiprocessing import Process
 from threading import Thread, Lock, Event
 
-from utilities import deserialize_tensor, relative_channel
+from utilities import deserialize_tensor, relative_channel, DEBUG
+
+mp_ctx = multiprocessing.get_context('forkserver')
+Process = mp_ctx.Process
+
+# TESTING Make all multiprocessing stuff threading for debugging purposes
+if DEBUG:
+    from threading import Thread
+    Process = Thread
 
 
 class SyncCommands:
@@ -87,12 +95,12 @@ class SynchronizationWorker(Thread):
                 with self.network_lock:
                     self.network.load_state_dict(self.state_dict)
             elif command == SyncCommands.REGISTER:
-                data = deserialize_tensor(deserialize_tensor(data)[self.network_index])
+                data = deserialize_tensor(pickle.loads(data)[self.network_index])
                 self._register(identity, *data)
             elif command == SyncCommands.DEREGISTER:
-                self._deregister(*deserialize_tensor(data))
+                self._deregister(data)
             elif command == SyncCommands.LOAD:
-                self.state_dict = deserialize_tensor(data)
+                self.state_dict = deserialize_tensor(pickle.loads(data)[self.network_index])
             elif command == SyncCommands.SHUTDOWN:
                 self._cleanup()
                 break
@@ -107,7 +115,7 @@ class SynchronizationManager(Process):
     def __init__(self, ipc_dir: str):
         super(SynchronizationManager, self).__init__(daemon=True)
         self.ipc_dir = ipc_dir
-        self.ready = multiprocessing.Event()
+        self.ready = mp_ctx.Event()
 
     def run(self) -> None:
         context = zmq.Context()

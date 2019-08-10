@@ -6,10 +6,13 @@ from io import BytesIO
 from multiprocessing.reduction import ForkingPickler
 
 from multiprocessing import Array
-from typing import Tuple
+from typing import Tuple, List
 
 import signal
 import os
+
+DEBUG = False
+VERBOSE = False
 
 
 def torch_dtype_to_numpy(dtype):
@@ -106,6 +109,14 @@ def unload_buffer(to_buffer, from_buffer, size: int, start_index: int = 0):
         # to_buffer[:size] = from_buffer[start_index:start_index + size]
 
 
+def slice_buffer(buffer, begin=0, end=-1):
+    if isinstance(buffer, dict):
+        return {key: slice_buffer(val, begin, end) for key, val in buffer.items()}
+    elif isinstance(buffer, list):
+        return [slice_buffer(val, begin, end) for val in buffer]
+    else:
+        return buffer[begin:end]
+
 def send_sigkill(pid):
     os.kill(pid, signal.SIGKILL)
 
@@ -113,3 +124,14 @@ def send_sigkill(pid):
 def relative_channel(base_channel, identity):
     protocol, path = base_channel.split("//")
     return "{}//{}/{}".format(protocol, identity, path)
+
+
+def iterate_window(iterator: List, n: int = 2):
+    size = len(iterator)
+    iterator = iter(iterator)
+    for _ in range(0, size, n):
+        yield (next(iterator) for _ in range(n))
+
+
+def optional(variable, default):
+    return default if variable is None else variable

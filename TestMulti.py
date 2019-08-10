@@ -1,11 +1,16 @@
 import torch
+from torch import nn, multiprocessing
+from torch.nn import functional as F
 from torch.multiprocessing.reductions import ForkingPickler
 
 import NetworkManager
 import NetworkClient
-from time import time
+from time import time, sleep
 
-torch.multiprocessing.set_sharing_strategy("file_system")
+
+BATCH_SIZE = 16
+WORKERS = 64
+COUNT = 100
 
 
 class TwoLayerNet(torch.nn.Module):
@@ -25,22 +30,42 @@ class TwoLayerNet(torch.nn.Module):
         a Tensor of output data. We can use Modules defined in the constructor as
         well as arbitrary operators on Tensors.
         """
-        h_relu = self.linear1(x).clamp(min=0)
+        h_relu = self.linear1(x['x']).clamp(min=0)
         for _ in range(10):
             h_relu = self.hidden(h_relu).clamp(min=0)
         y_pred = self.linear2(h_relu)
         return y_pred
 
 
-output_shape = (3, )
-output_type = torch.float32
+class ConvNet(torch.nn.Module):
+    def __init__(self):
+        super(ConvNet, self).__init__()
 
-input_shape = (8, )
-input_type = torch.float32
+        self.conv1 = nn.Conv2d(3, 32, 7)
+        self.conv2 = nn.Conv2d(32, 128, 5)
+        self.conv3 = nn.Conv2d(128, 256, 3)
 
-manager = NetworkManager.NetworkManager(TwoLayerNet, input_shape, input_type, output_shape, output_type, placement={'cpu': 4},
-                                        network_args=[8, 128, 3], batch_size=32)
-manager.start()
+        self.output1 = nn.Linear(4 * 4 * 256, 256)
+        self.output2 = nn.Linear(256, 256)
+        self.output3 = nn.Linear(256, 1)
+
+    def forward(self, x):
+        y = self.conv1(x)
+        y = F.relu(y)
+
+        y = self.conv2(y)
+        y = F.relu(y)
+
+        y = self.conv3(y)
+        y = F.relu(y)
+
+        y = y.view(y.size(0), -1)
+        y = self.output1(y)
+
+        for _ in range(10):
+            y = self.output2(y)
+
+        return self.output3(y)
 
 
 class TestWorker(torch.multiprocessing.Process):
@@ -55,6 +80,7 @@ class TestWorker(torch.multiprocessing.Process):
     def run(self):
         client = NetworkClient.NetworkClient(self.config, 1)
         client.register()
+
         self.ready.set()
 
         self.start_event.wait()
@@ -65,33 +91,51 @@ class TestWorker(torch.multiprocessing.Process):
 
         self.ready.set()
 
-WORKERS = 64
-COUNT = 1000
-workers = [TestWorker(manager.client_config, COUNT) for _ in range(WORKERS)]
 
-for worker in workers:
-    worker.start()
+if __name__ == '__main__':
+    multiprocessing.set_start_method('forkserver')
 
-for worker in workers:
-    worker.ready.wait()
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = torch.device(device)
 
-t0 = time()
-for worker in workers:
-    worker.ready.clear()
-    worker.start_event.set()
+    output_shape = (1, )
+    output_type = torch.float32
 
-for worker in workers:
-    worker.ready.wait()
-    worker.join()
-t1 = time()
-print(f"Remote Time: {t1 - t0}")
+    input_shape = (3, 16, 16)
+    input_type = torch.float32
 
-# x = torch.rand(1, 8)
-# t0 = time()
-# for _ in range(COUNT * WORKERS):
-#     manager._local_network(x)
-# t1 = time()
-# print(f"Local Time: {t1 - t0}")
+    try:
+        placement = NetworkManager.PlacementStrategy.round_robin_gpu_placement(num_networks=4)
+    except ValueError:
+        placement = {'cpu': 4}
 
+    manager = NetworkManager.NetworkManager(input_shape, input_type, output_shape, output_type, BATCH_SIZE,
+                                            ConvNet, placement=placement)
+    with manager:
+        workers = [TestWorker(manager.client_config, COUNT) for _ in range(WORKERS)]
 
-manager.shutdown()
+        for worker in workers:
+            worker.start()
+
+        for worker in workers:
+            worker.ready.wait()
+
+        sleep(3)
+
+        t0 = time()
+        for worker in workers:
+            worker.ready.clear()
+            worker.start_event.set()
+
+        for worker in workers:
+            worker.ready.wait()
+            worker.join()
+        t1 = time()
+        print(f"Remote Time: {t1 - t0}")
+
+        x = torch.rand(1, *input_shape)
+        t0 = time()
+        for _ in range(COUNT * WORKERS):
+            manager._local_network(x.to(device))
+        t1 = time()
+        print(f"Local Time: {t1 - t0}")
