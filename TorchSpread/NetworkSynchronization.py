@@ -5,17 +5,15 @@ import pickle
 from torch import multiprocessing, nn
 from threading import Thread, Lock, Event
 
-from utilities import deserialize_tensor, relative_channel, DEBUG
+from .utilities import deserialize_tensor, relative_channel
 
 mp_ctx = multiprocessing.get_context('forkserver')
 Process = mp_ctx.Process
 
-# TESTING Make all multiprocessing stuff threading for debugging purposes
-if DEBUG:
-    Process = Thread
-
 
 class SyncCommands:
+    """ Namespace of commands that can be sent across the synchronization channels.
+    """
     # Requests
     REGISTER = b'R'
     DEREGISTER = b'D'
@@ -33,7 +31,8 @@ class SynchronizationWorker(Thread):
     SYNC_BACKEND_CHANNEL = "ipc://synchronization_backend.ipc"
     SYNC_FRONTEND_CHANNEL = "ipc://synchronization_frontend.ipc"
 
-    def __init__(self, network: nn.Module, network_index: int, network_identity: bytes, ipc_dir: str, context: zmq.Context = None):
+    def __init__(self, network: nn.Module, network_index: int, network_identity: bytes, ipc_dir: str,
+                 context: zmq.Context = None):
         """ Asynchronous Thread responsible for adding clients to this networks registry and synchronizing weights
         with the training network.
 

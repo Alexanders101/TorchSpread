@@ -1,22 +1,18 @@
 import torch
 from torch import multiprocessing
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import zmq
 import pickle
 from threading import Thread, Event
 
-from NetworkSynchronization import SynchronizationWorker
-from utilities import make_buffer, load_buffer, unload_buffer, DEBUG, VERBOSE
-from utilities import serialize_int, deserialize_int, iterate_window, slice_buffer, send_buffer
+from .NetworkSynchronization import SynchronizationWorker
+from .utilities import make_buffer, load_buffer, unload_buffer, VERBOSE, BufferType
+from .utilities import serialize_int, deserialize_int, iterate_window, slice_buffer, send_buffer
 
 mp_ctx = multiprocessing.get_context('forkserver')
 Process = mp_ctx.Process
-
-# TESTING Make all multiprocessing stuff threading for debugging purposes
-if DEBUG:
-    Process = Thread
 
 # TESTING Print all communication
 debug_print = print if VERBOSE else (lambda x: x)
@@ -25,8 +21,8 @@ debug_print = print if VERBOSE else (lambda x: x)
 class RequestWorker(Thread):
     WORKER_REQUEST_CHANNEL = "inproc://REQUEST"
 
-    def __init__(self, index: int, identity: bytes, client_input_buffers: Dict[str, object],
-                 batch_input_buffers: List[object], network_input_buffers: List[object],
+    def __init__(self, index: int, identity: bytes, client_input_buffers: Dict[str, BufferType],
+                 batch_input_buffers: List[BufferType], network_input_buffers: List[BufferType],
                  network_requests: List[List[Tuple]], gpu: bool, request_channel: str, context: zmq.Context):
         super(RequestWorker, self).__init__()
 
@@ -100,7 +96,7 @@ class NetworkWorker(Process):
     READY = b"R"
     SHUTDOWN = b"S"
 
-    def __init__(self, index: int, device: str, config: Dict[str, object]):
+    def __init__(self, index: int, device: str, config: Dict[str, Union[int, str]]):
         super(NetworkWorker, self).__init__()
         self.num_buffers = config["num_worker_buffers"]
 
@@ -120,7 +116,8 @@ class NetworkWorker(Process):
         synchronization_thread.ready.wait()
         return synchronization_thread
 
-    def _start_request_threads(self, batch_input_buffers, network_input_buffers, network_requests, client_input_buffers, context):
+    def _start_request_threads(self, batch_input_buffers, network_input_buffers, network_requests,
+                               client_input_buffers, context):
         request_channel = self.config["request_channel"]
         request_threads = []
         for i in range(self.num_buffers):

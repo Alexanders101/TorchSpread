@@ -2,10 +2,10 @@ import zmq
 import pickle
 
 from typing import Dict
-from utilities import make_buffer, serialize_tensor, serialize_int, load_buffer, optional
+from .utilities import make_buffer, serialize_tensor, serialize_int, load_buffer
 
-from NetworkManager import ResponseManager, RequestManager
-from NetworkSynchronization import SyncCommands, SynchronizationManager, relative_channel
+from .NetworkManager import ResponseManager, RequestManager
+from .NetworkSynchronization import SyncCommands, SynchronizationManager, relative_channel
 
 
 class NetworkClient:
@@ -37,13 +37,13 @@ class NetworkClient:
         if self.connected:
             raise ValueError("Cannot register a client twice.")
 
-        buffers = [serialize_tensor([self.input_buffer, self.output_buffer]) for _ in range(self.config["num_networks"])]
+        num_networks = self.config["num_networks"]
+        buffers = [serialize_tensor([self.input_buffer, self.output_buffer]) for _ in range(num_networks)]
         self.synchronization_queue.send_multipart([SyncCommands.REGISTER, pickle.dumps(buffers)])
         for _ in range(self.config["num_networks"]):
-            network, identity = self.synchronization_queue.recv_multipart()
+            network, self.identity = self.synchronization_queue.recv_multipart()
 
-        self.identity = identity
-        self.response_queue.setsockopt(zmq.IDENTITY, identity)
+        self.response_queue.setsockopt(zmq.IDENTITY, self.identity)
         self.request_queue.connect(relative_channel(RequestManager.FRONTEND_CHANNEL, self.ipc_dir))
         self.response_queue.connect(relative_channel(ResponseManager.FRONTEND_CHANNEL, self.ipc_dir))
 

@@ -2,16 +2,15 @@ import torch
 from torch import nn, multiprocessing
 from torch.nn import functional as F
 
-import NetworkManager
-import NetworkClient
+from TorchSpread import NetworkClient, NetworkManager, PlacementStrategy
 from time import time, sleep
 
 from multiprocessing import Value
 import ctypes
 
 
-BATCH_SIZE = 32
-WORKERS = 256
+BATCH_SIZE = 8
+WORKERS = 64
 COUNT = 100
 
 
@@ -85,7 +84,7 @@ class TestWorker(torch.multiprocessing.Process):
         self.time = Value(ctypes.c_double, lock=False)
 
     def run(self):
-        with NetworkClient.NetworkClient(self.config, 1) as client:
+        with NetworkClient(self.config, 1) as client:
             self.ready.set()
 
             self.start_event.wait()
@@ -100,9 +99,7 @@ class TestWorker(torch.multiprocessing.Process):
         self.ready.set()
 
 
-if __name__ == '__main__':
-    multiprocessing.set_start_method('forkserver')
-
+def main(batch_size: int, num_workers: int, repeat_count: int):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     device = torch.device(device)
 
@@ -112,18 +109,15 @@ if __name__ == '__main__':
     input_shape = (3, 64, 64)
     input_type = torch.float32
 
-    try:
-        placement = NetworkManager.PlacementStrategy.round_robin_gpu_placement(num_networks=4)
-    except ValueError:
+    if torch.cuda.is_available():
+        placement = PlacementStrategy.round_robin_gpu_placement(num_networks=4)
+    else:
         placement = {'cpu': 4}
 
-    # placement = {'cpu': 4}
-    # device = 'cpu'
-
-    manager = NetworkManager.NetworkManager(input_shape, input_type, output_shape, output_type, BATCH_SIZE,
-                                            ConvNet, placement=placement, num_worker_buffers=2)
+    manager = NetworkManager(input_shape, input_type, output_shape, output_type, batch_size,
+                             ConvNet, placement=placement, num_worker_buffers=2)
     with manager:
-        workers = [TestWorker(manager.client_config, COUNT) for _ in range(WORKERS)]
+        workers = [TestWorker(manager.client_config, repeat_count) for _ in range(num_workers)]
 
         for worker in workers:
             worker.start()
@@ -144,13 +138,18 @@ if __name__ == '__main__':
             average_time += worker.time.value
             worker.join()
 
-        print(f"Remote Time: {average_time / WORKERS}")
+        print(f"Remote Time: {average_time / num_workers}")
 
         t0 = time()
         with torch.no_grad():
-            for _ in range(COUNT * WORKERS):
+            for _ in range(repeat_count * num_workers):
                 x = torch.rand(1, *input_shape)
-                y = manager._local_network(x.to(device))
+                y = manager.unsynchronized_training_network(x.to(device))
                 y = y.cpu()
         t1 = time()
         print(f"Local Time: {t1 - t0}")
+
+
+if __name__ == '__main__':
+    multiprocessing.set_start_method('forkserver')
+    main(BATCH_SIZE, WORKERS, COUNT)

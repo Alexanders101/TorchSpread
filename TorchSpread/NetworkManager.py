@@ -7,21 +7,15 @@ from contextlib import contextmanager
 from collections import Counter
 from tempfile import TemporaryDirectory
 from typing import Type, Union, Tuple, Dict, Optional, List
-from threading import Thread
 
-from NetworkWorker import NetworkWorker
-from NetworkSynchronization import SynchronizationManager, SyncCommands
-from utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional, DEBUG
+from .NetworkWorker import NetworkWorker
+from .NetworkSynchronization import SynchronizationManager, SyncCommands
+from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
 
 from torch import multiprocessing
 
 mp_ctx = multiprocessing.get_context('forkserver')
 Process = mp_ctx.Process
-
-
-# TESTING Make all multiprocessing stuff threading for debugging purposes
-if DEBUG:
-    Process = Thread
 
 
 class PlacementStrategy:
