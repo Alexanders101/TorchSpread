@@ -100,7 +100,7 @@ def load_buffer(to_buffer: BufferType, from_buffer: BufferType, size: int, start
         for key, to_tensor in to_buffer.items():
             load_buffer(to_tensor, from_buffer[key], size, start_index)
 
-    elif isinstance(to_buffer, list):
+    elif isinstance(to_buffer, (list, tuple)):
         for to_tensor, from_tensor in zip(to_buffer, from_buffer):
             load_buffer(to_tensor, from_tensor, size, start_index)
 
@@ -129,7 +129,7 @@ def unload_buffer(to_buffer, from_buffer, size: int, start_index: int = 0):
         for key, to_tensor in to_buffer.items():
             unload_buffer(to_tensor, from_buffer[key], size, start_index)
 
-    elif isinstance(to_buffer, list):
+    elif isinstance(to_buffer, (list, tuple)):
         for to_tensor, from_tensor in zip(to_buffer, from_buffer):
             unload_buffer(to_tensor, from_tensor, size, start_index)
 
@@ -155,7 +155,7 @@ def slice_buffer(buffer: BufferType, begin: int = 0, end: int = -1):
     """
     if isinstance(buffer, dict):
         return {key: slice_buffer(val, begin, end) for key, val in buffer.items()}
-    elif isinstance(buffer, list):
+    elif isinstance(buffer, (list, tuple)):
         return [slice_buffer(val, begin, end) for val in buffer]
     else:
         return buffer[begin:end]
@@ -173,7 +173,7 @@ def send_buffer(buffer: BufferType, device: str):
     """
     if isinstance(buffer, dict):
         return {key: send_buffer(val, device) for key, val in buffer.items()}
-    elif isinstance(buffer, list):
+    elif isinstance(buffer, (list, tuple)):
         return [send_buffer(val, device) for val in buffer]
     else:
         return buffer.to(device)

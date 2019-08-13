@@ -149,7 +149,7 @@ class NetworkWorker(Process):
         # Network Setup
         # ########################################################################################
         # Create buffers
-        network_requests = [[] for _ in range(self.num_buffers)]
+        network_requests: List[List[Tuple]] = [[] for _ in range(self.num_buffers)]
 
         # The tensors that are fed into the network
         network_input_buffers = [make_buffer(config["batch_size"], config["input_shape"], config["input_type"], device)
@@ -163,7 +163,7 @@ class NetworkWorker(Process):
             batch_input_buffers = network_input_buffers
 
         # Initialize local copy of the network
-        network = config['network_class'](*config["network_args"], **config["network_kwargs"])
+        network = config['network_class'](True, *config["network_args"], **config["network_kwargs"])
         network = network.to(device)
 
         # Communication Setup

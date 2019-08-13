@@ -7,12 +7,13 @@ from contextlib import contextmanager
 from collections import Counter
 from tempfile import TemporaryDirectory
 from typing import Type, Union, Tuple, Dict, Optional, List
+from abc import ABC
 
 from .NetworkWorker import NetworkWorker
 from .NetworkSynchronization import SynchronizationManager, SyncCommands
 from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
 
-from torch import multiprocessing
+from torch import multiprocessing, nn
 
 mp_ctx = multiprocessing.get_context('forkserver')
 Process = mp_ctx.Process
@@ -70,6 +71,13 @@ class PlacementStrategy:
         return {'cpu': num_networks}
 
 
+class DistributedModule(nn.Module, ABC):
+    """ Helper class to ensure you remember to but worker as the first parameter. """
+    def __init__(self, worker: bool):
+        super(DistributedModule, self).__init__()
+        self.worker = worker
+
+
 class NetworkManager:
     def __init__(self,
                  input_shape: Union[Tuple, List[Tuple], Dict[object, Tuple]],
@@ -112,7 +120,9 @@ class NetworkManager:
             predict on samples less than the batch size, we simply need to create the input buffers
             with a given batch size.
         network_class: Subclass of torch.nn.Module
-            Your network class. Please ensure the forward function has a single input and output.
+            Your network class. Please ensure the forward function has a single input and output. Although these
+            inputs and output can be any buffer structure. Furthermore, the first parameter in the __init__
+            function has to be 'worker', a variable stating if it is a worker network or the training network.
         network_args: List
             List of arguments to pass to the network constructor.
         network_kwargs: Dict
@@ -346,7 +356,7 @@ class NetworkManager:
             network.ready.wait()
 
         printer("Starting Local Network")
-        self._local_network = self.network_class(*self.network_args, **self.network_kwargs)
+        self._local_network = self.network_class(False, *self.network_args, **self.network_kwargs)
         self._local_network = self._local_network.to(self.training_placement)
         self._state_dict = self._local_network.state_dict()
         for parameter in self._state_dict.values():

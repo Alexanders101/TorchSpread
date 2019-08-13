@@ -1,8 +1,10 @@
 import zmq
 import pickle
+import torch
+import numpy as np
 
-from typing import Dict
-from .utilities import make_buffer, serialize_tensor, serialize_int, load_buffer
+from typing import Dict, Union, Optional
+from .utilities import make_buffer, serialize_tensor, serialize_int, load_buffer, slice_buffer
 
 from .NetworkManager import ResponseManager, RequestManager
 from .NetworkSynchronization import SyncCommands, SynchronizationManager, relative_channel
@@ -70,6 +72,32 @@ class NetworkClient:
         if self.identity is not None:
             self.synchronization_queue.send_multipart([SyncCommands.DEREGISTER, self.identity])
 
+    def __call__(self, data):
+        return self.predict(data)
+
+    def _load_input_buffer(self, data, input_buffer=None) -> int:
+        size = 0
+        if input_buffer is None:
+            input_buffer = self.input_buffer
+
+        if isinstance(data, dict):
+            for key, tensor in data.items():
+                size = self._load_input_buffer(tensor, input_buffer[key])
+            return size
+
+        elif isinstance(data, (list, tuple)):
+            for tensor, buffer in zip(data, input_buffer):
+                size = self._load_input_buffer(tensor, buffer)
+            return size
+
+        else:
+            if not torch.is_tensor(data):
+                data = torch.from_numpy(data)
+
+            size = data.size(0)
+            input_buffer[:size].copy_(data)
+            return size
+
     @property
     def connected(self):
         return self.identity is not None
@@ -89,13 +117,6 @@ class NetworkClient:
         self.predict_size = size
         self.request_queue.send_multipart([self.identity, serialize_int(size)])
 
-    def receive_async(self):
-        assert self.predicting, "Cannot receive a result until launching an asynchronous prediction request."
-
-        self.response_queue.recv_multipart()
-        self.predict_size = None
-        return self.output_buffer[:self.predict_size]
-
     def predict_inplace(self, size: int = None):
         assert self.connected, "Worker has tried to predict without registering first."
 
@@ -103,18 +124,46 @@ class NetworkClient:
         self.request_queue.send_multipart([self.identity, serialize_int(size)])
 
         self.response_queue.recv_multipart()
-        return self.output_buffer[:size]
+        return slice_buffer(self.output_buffer, 0, size)
 
-    def predict_tensor(self, data):
-        if isinstance(data, dict):
-            size = next(iter(data.values())).size(0)
-        elif isinstance(data, list):
-            size = data[0].size(0)
+    def predict(self, data):
+        """ General prediction function for the client. Determines the correct type of prediction to make
+
+        Parameters
+        ----------
+        data: A buffer of Numpy arrays, torch tensors, or integer size
+            If data is an integer, then we predict on the current input buffer in place with the given size.
+            If data is a Tensor, then we copy the tensor and predict on it
+            If data is a numpy array, we convert the array into a tensor and predict on it.
+
+        Returns
+        -------
+        A view into the output buffer as a torch tensor.
+        """
+        if isinstance(data, int):
+            size = data
         else:
-            size = data.size(0)
+            size = self._load_input_buffer(data)
 
-        load_buffer(self.input_buffer, data, size, 0)
+        # print(f"SIZE = {size}")
         return self.predict_inplace(size)
 
+    def predict_async(self, data):
+        assert not self.predicting, "Cannot launch two asynchronous prediction requests at once. " \
+                                    "Must finish one before sending a new one."
 
+        if isinstance(data, int):
+            size = data
+        else:
+            size = self._load_input_buffer(data)
 
+        self.predict_inplace_async(size)
+
+    def receive_async(self):
+        assert self.predicting, "Cannot receive a result until launching an asynchronous prediction request."
+
+        self.response_queue.recv_multipart()
+
+        predict_size = self.predict_size
+        self.predict_size = None
+        return slice_buffer(self.output_buffer, 0, predict_size)
