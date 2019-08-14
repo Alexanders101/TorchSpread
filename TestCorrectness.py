@@ -1,6 +1,7 @@
 from TorchSpread import NetworkManager, NetworkClient
 
 import torch
+from torch import nn
 import numpy as np
 
 from typing import Tuple

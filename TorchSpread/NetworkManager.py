@@ -2,89 +2,21 @@ import zmq
 import zmq.devices
 import torch
 import pickle
-import itertools
 
 from contextlib import contextmanager
 from collections import Counter
 from tempfile import TemporaryDirectory
-from typing import Type, Union, Tuple, Dict, Optional, List, Callable
-from abc import ABC
+from typing import Type, Union, Tuple, Dict, Optional, List
 
 from .NetworkWorker import NetworkWorker
 from .NetworkSynchronization import SynchronizationManager, SyncCommands
+from .ManagerTools import TrainingWrapper
 from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
 
 from torch import multiprocessing, nn
 
 mp_ctx = multiprocessing.get_context('forkserver')
 Process = mp_ctx.Process
-
-
-class PlacementStrategy:
-    """
-    Namespace containing various automated placement strategies for
-    placing networks onto many-gpu or many-cpu machines.
-    """
-    @staticmethod
-    def _get_available_gpus():
-        num_gpu = torch.cuda.device_count()
-        if num_gpu < 1:
-            raise ValueError("This machine has no GPUs installed. Cannot use gpu placement strategy.")
-        return ["cuda:{}".format(i) for i in range(num_gpu)]
-
-    @staticmethod
-    def round_robin_gpu_placement(num_networks: int = 1):
-        """ Place networks sequentially across all available GPUs.
-
-        Parameters
-        ----------
-        num_networks: int
-            Total number of networks to place.
-        """
-        gpus = PlacementStrategy._get_available_gpus()
-        placement = {gpu: 0 for gpu in gpus}
-
-        for _, gpu in zip(range(num_networks), itertools.cycle(gpus)):
-            placement[gpu] += 1
-
-        return placement
-
-    @staticmethod
-    def uniform_gpu_placement(networks_per_gpu=1):
-        """ Place an equal number of networks on all available GPU.
-        Parameters
-        ----------
-        networks_per_gpu: int
-            Number of networks to place on each GPU.
-            Total number of networks will be #GPU * networks_per_gpu
-        """
-        return {gpu: networks_per_gpu for gpu in PlacementStrategy._get_available_gpus()}
-
-    @staticmethod
-    def uniform_cpu_placement(num_networks: int = 1):
-        """ Place a number of networks on only cpus.
-
-        Parameters
-        ----------
-        num_networks: int
-            Total number of networks to place.
-        """
-        return {'cpu': num_networks}
-
-
-class DistributedModule(nn.Module, ABC):
-    """ Helper class to ensure you remember to but worker as the first parameter. """
-    def __init__(self, worker: bool):
-        super(DistributedModule, self).__init__()
-        self.worker = worker
-
-
-class TrainingWrapper:
-    @staticmethod
-    def DataParallel(device_ids=None, output_device=None, dim=0):
-        def wrapper(network):
-            return nn.DataParallel(network, device_ids, output_device, dim)
-        return wrapper
 
 
 class NetworkManager:
@@ -184,6 +116,7 @@ class NetworkManager:
         # Local network storage
         self._local_network = None
         self._state_dict = None
+        self._wrapper = None
         self._network_lock = mp_ctx.Lock()
 
         # Local communication
@@ -271,7 +204,7 @@ class NetworkManager:
         self._check_started()
 
         # Update the shared state dict
-        training_weights = self._local_network.state_dict()
+        training_weights = self._wrapper.wrap_state_dict(self._local_network.state_dict())
         shared_weights = self._state_dict
         for key in shared_weights:
             shared_weights[key].copy_(training_weights[key])
@@ -333,7 +266,7 @@ class NetworkManager:
         self._check_started()
         self._local_network.load_state_dict(state_dict, strict=strict)
 
-    def start(self, training_wrapper: Optional[Callable[[nn.Module], nn.Module]] = None, verbose: bool = True):
+    def start(self, training_wrapper: TrainingWrapper = None, verbose: bool = True):
         """ Start the network manager and all of the worker networks.
 
         Parameters
@@ -346,6 +279,8 @@ class NetworkManager:
         """
         assert not self.started, "Manager should not be started twice"
         printer = print if verbose else (lambda x: x)
+
+        training_wrapper = optional(training_wrapper, TrainingWrapper())
 
         self.request_manager.start()
         self.response_manager.start()
@@ -371,11 +306,11 @@ class NetworkManager:
         self._local_network = self.network_class(False, *self.network_args, **self.network_kwargs)
         self._local_network = self._local_network.to(self.training_placement)
 
-        if training_wrapper is not None:
-            self._local_network = training_wrapper(self._local_network)
+        self._local_network = training_wrapper.wrap_network(self._local_network)
+        self._wrapper = training_wrapper
 
         printer("Synchronizing initial weights")
-        self._state_dict = self._local_network.state_dict()
+        self._state_dict = training_wrapper.wrap_state_dict(self._local_network.state_dict())
         for parameter in self._state_dict.values():
             parameter.share_memory_()
 
