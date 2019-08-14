@@ -15,8 +15,10 @@ COUNT = 100
 
 
 class ConvNet(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, worker):
         super(ConvNet, self).__init__()
+
+        self.worker = worker
 
         self.conv1 = nn.Conv2d(3, 32, 7, 2)
         self.conv2 = nn.Conv2d(32, 64, 5, 2)
@@ -47,31 +49,6 @@ class ConvNet(torch.nn.Module):
             y = self.output2(y)
 
         return self.output3(y)
-
-
-class TwoLayerNet(nn.Module):
-    def __init__(self, worker, D_in, H, D_out):
-        """
-        In the constructor we instantiate two nn.Linear modules and assign them as
-        member variables.
-        """
-        super(TwoLayerNet, self).__init__()
-        self.worker = worker
-        self.linear1 = torch.nn.Linear(D_in, H)
-        self.hidden = torch.nn.Linear(H, H)
-        self.linear2 = torch.nn.Linear(H, D_out)
-
-    def forward(self, x):
-        """
-        In the forward function we accept a Tensor of input data and we must return
-        a Tensor of output data. We can use Modules defined in the constructor as
-        well as arbitrary operators on Tensors.
-        """
-        h_relu = self.linear1(x['x']).clamp(min=0)
-        # for _ in range(10):
-        #     h_relu = self.hidden(h_relu).clamp(min=0)
-        y_pred = self.linear2(h_relu)
-        return y_pred
 
 
 class TestWorker(torch.multiprocessing.Process):
@@ -111,9 +88,9 @@ def main(batch_size: int, num_workers: int, repeat_count: int):
     input_type = torch.float32
 
     if torch.cuda.is_available():
-        placement = PlacementStrategy.round_robin_gpu_placement(num_networks=4)
+        placement = PlacementStrategy.round_robin_gpu_placement(num_networks=1)
     else:
-        placement = {'cpu': 4}
+        placement = {'cpu': 1}
 
     manager = NetworkManager(input_shape, input_type, output_shape, output_type, batch_size,
                              ConvNet, placement=placement, num_worker_buffers=2)
@@ -148,7 +125,16 @@ def main(batch_size: int, num_workers: int, repeat_count: int):
                 y = manager.unsynchronized_training_network(x.to(device))
                 y = y.cpu()
         t1 = time()
-        print(f"Local Time: {t1 - t0}")
+        print(f"Equivalent Local Time: {t1 - t0}")
+
+        t0 = time()
+        with torch.no_grad():
+            for _ in range(repeat_count * num_workers // batch_size):
+                x = torch.rand(batch_size, *input_shape)
+                y = manager.unsynchronized_training_network(x.to(device))
+                y = y.cpu()
+        t1 = time()
+        print(f"Batch Local Time: {t1 - t0}")
 
 
 if __name__ == '__main__':

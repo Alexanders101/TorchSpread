@@ -6,7 +6,7 @@ import numpy as np
 from typing import Dict, Union, Optional
 from .utilities import make_buffer, serialize_tensor, serialize_int, load_buffer, slice_buffer
 
-from .NetworkManager import ResponseManager, RequestManager
+from .NetworkManager import ManagerFrontend, RequestManager
 from .NetworkSynchronization import SyncCommands, SynchronizationManager, relative_channel
 
 
@@ -26,11 +26,9 @@ class NetworkClient:
         # Create communication objects
         self.context = zmq.Context()
 
-        self.request_queue = self.context.socket(zmq.PUSH)
-        self.response_queue = self.context.socket(zmq.DEALER)
-
         self.synchronization_queue = self.context.socket(zmq.DEALER)
         self.synchronization_queue.connect(relative_channel(SynchronizationManager.SYNC_FRONTEND_CHANNEL, self.ipc_dir))
+        self.request_queue = self.context.socket(zmq.DEALER)
 
         self.identity = None
         self.predict_size = None
@@ -45,9 +43,8 @@ class NetworkClient:
         for _ in range(self.config["num_networks"]):
             network, self.identity = self.synchronization_queue.recv_multipart()
 
-        self.response_queue.setsockopt(zmq.IDENTITY, self.identity)
-        self.request_queue.connect(relative_channel(RequestManager.FRONTEND_CHANNEL, self.ipc_dir))
-        self.response_queue.connect(relative_channel(ResponseManager.FRONTEND_CHANNEL, self.ipc_dir))
+        self.request_queue.setsockopt(zmq.IDENTITY, self.identity)
+        self.request_queue.connect(relative_channel(ManagerFrontend.FRONTEND_CHANNEL, self.ipc_dir))
 
     def deregister(self):
         if not self.connected:
@@ -58,8 +55,6 @@ class NetworkClient:
             self.synchronization_queue.recv_multipart()
 
         self.identity = None
-        self.request_queue.disconnect(relative_channel(RequestManager.FRONTEND_CHANNEL, self.ipc_dir))
-        self.response_queue.disconnect(relative_channel(ResponseManager.FRONTEND_CHANNEL, self.ipc_dir))
 
     def __enter__(self):
         self.register()
@@ -115,15 +110,15 @@ class NetworkClient:
             size = self.batch_size
 
         self.predict_size = size
-        self.request_queue.send_multipart([self.identity, serialize_int(size)])
+        self.request_queue.send(serialize_int(size))
 
     def predict_inplace(self, size: int = None):
         assert self.connected, "Worker has tried to predict without registering first."
 
         size = self.batch_size if size is None else size
-        self.request_queue.send_multipart([self.identity, serialize_int(size)])
+        self.request_queue.send(serialize_int(size))
 
-        self.response_queue.recv_multipart()
+        self.request_queue.recv()
         return slice_buffer(self.output_buffer, 0, size)
 
     def predict(self, data):
@@ -162,7 +157,7 @@ class NetworkClient:
     def receive_async(self):
         assert self.predicting, "Cannot receive a result until launching an asynchronous prediction request."
 
-        self.response_queue.recv_multipart()
+        self.request_queue.recv()
 
         predict_size = self.predict_size
         self.predict_size = None

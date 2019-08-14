@@ -1,4 +1,5 @@
 import zmq
+import zmq.devices
 import torch
 import pickle
 import itertools
@@ -6,7 +7,7 @@ import itertools
 from contextlib import contextmanager
 from collections import Counter
 from tempfile import TemporaryDirectory
-from typing import Type, Union, Tuple, Dict, Optional, List
+from typing import Type, Union, Tuple, Dict, Optional, List, Callable
 from abc import ABC
 
 from .NetworkWorker import NetworkWorker
@@ -76,6 +77,14 @@ class DistributedModule(nn.Module, ABC):
     def __init__(self, worker: bool):
         super(DistributedModule, self).__init__()
         self.worker = worker
+
+
+class TrainingWrapper:
+    @staticmethod
+    def DataParallel(device_ids=None, output_device=None, dim=0):
+        def wrapper(network):
+            return nn.DataParallel(network, device_ids, output_device, dim)
+        return wrapper
 
 
 class NetworkManager:
@@ -169,7 +178,7 @@ class NetworkManager:
 
         # Create the management processes
         self.request_manager = RequestManager(self.batch_size, self.num_networks, self.network_identities, self.ipc_dir)
-        self.response_manager = ResponseManager(self.num_networks, self.ipc_dir)
+        self.response_manager = ManagerFrontend(self.num_networks, self.ipc_dir)
         self.synchronization_manager = SynchronizationManager(self.ipc_dir)
 
         # Local network storage
@@ -231,7 +240,7 @@ class NetworkManager:
             "ipc_dir": self.ipc_dir,
             "num_worker_buffers": self.num_worker_buffers,
             "request_channel": relative_channel(RequestManager.BACKEND_CHANNEL, self.ipc_dir),
-            "response_channel": relative_channel(ResponseManager.BACKEND_CHANNEL, self.ipc_dir),
+            "response_channel": relative_channel(ManagerFrontend.BACKEND_CHANNEL, self.ipc_dir),
             "ready_channel": relative_channel(RequestManager.INTERCOMMUNICATION_CHANNEL, self.ipc_dir)
         }
 
@@ -324,11 +333,14 @@ class NetworkManager:
         self._check_started()
         self._local_network.load_state_dict(state_dict, strict=strict)
 
-    def start(self, verbose: bool = True):
+    def start(self, training_wrapper: Optional[Callable[[nn.Module], nn.Module]] = None, verbose: bool = True):
         """ Start the network manager and all of the worker networks.
 
         Parameters
         ----------
+        training_wrapper: function mapping (nn.Module, ) -> nn.Module
+            An extra wrapping function applied to the training network. One example use-case of this would be
+            to add data-parallelism to the training network.
         verbose: bool
             Whether or not to print the phase of launch.
         """
@@ -358,11 +370,15 @@ class NetworkManager:
         printer("Starting Local Network")
         self._local_network = self.network_class(False, *self.network_args, **self.network_kwargs)
         self._local_network = self._local_network.to(self.training_placement)
+
+        if training_wrapper is not None:
+            self._local_network = training_wrapper(self._local_network)
+
+        printer("Synchronizing initial weights")
         self._state_dict = self._local_network.state_dict()
         for parameter in self._state_dict.values():
             parameter.share_memory_()
 
-        printer("Synchronizing initial weights")
         self.synchronization_queue.connect(relative_channel(SynchronizationManager.SYNC_FRONTEND_CHANNEL, self.ipc_dir))
         state_buffers = [serialize_tensor(self._state_dict) for _ in range(self.num_networks)]
         self._send_synchronization_command(SyncCommands.LOAD, pickle.dumps(state_buffers))
@@ -396,10 +412,10 @@ class NetworkManager:
 
 
 class RequestManager(Process):
+    """ Main process to batch all incoming prediction requests and load balance the networks. """
     FRONTEND_CHANNEL = "ipc://request_frontend.ipc"
     BACKEND_CHANNEL = "ipc://request_backend.ipc"
     INTERCOMMUNICATION_CHANNEL = "ipc://network_interconnect.ipc"
-    SENDER_CHANNEL = "inproc://sending_requests"
 
     # Command to shutdown all network workers
     SHUTDOWN = b'SHUTDOWN'
@@ -491,12 +507,12 @@ class RequestManager(Process):
             backend.send_multipart([network, pickle.dumps(current_batch)])
 
 
-class ResponseManager(Process):
+class ManagerFrontend(Process):
     FRONTEND_CHANNEL = "ipc://response_frontend.ipc"
     BACKEND_CHANNEL = "ipc://response_backend.ipc"
 
     def __init__(self, num_networks: int, ipc_dir: str):
-        super(ResponseManager, self).__init__(daemon=True)
+        super(ManagerFrontend, self).__init__(daemon=True)
 
         self.num_networks = num_networks
         self.ipc_dir = ipc_dir
@@ -512,12 +528,29 @@ class ResponseManager(Process):
 
         # Backend channel to send batches to networks
         # NetworkWorkerResponder -> Done Command -> [ResponseManager]
-        backend = context.socket(zmq.PULL)
-        backend.bind(relative_channel(self.BACKEND_CHANNEL, self.ipc_dir))
+        response_backend = context.socket(zmq.PULL)
+        response_backend.bind(relative_channel(self.BACKEND_CHANNEL, self.ipc_dir))
+
+        # Backend channel to send batches to networks
+        # NetworkWorkerResponder -> Done Command -> [ResponseManager]
+        request_backend = context.socket(zmq.PUSH)
+        request_backend.connect(relative_channel(RequestManager.FRONTEND_CHANNEL, self.ipc_dir))
 
         # We are ready for connections
         self.ready.set()
 
+        poller = zmq.Poller()
+        poller.register(frontend, zmq.POLLIN)
+        poller.register(response_backend, zmq.POLLIN)
+
+        # Switch messages between sockets
         while True:
-            response = backend.recv_multipart()
-            frontend.send_multipart(response)
+            sockets = dict(poller.poll())
+
+            if frontend in sockets:
+                request = frontend.recv_multipart()
+                request_backend.send_multipart(request)
+
+            if response_backend in sockets:
+                response = response_backend.recv_multipart()
+                frontend.send_multipart(response)
