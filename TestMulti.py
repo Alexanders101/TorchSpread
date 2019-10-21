@@ -9,8 +9,8 @@ from multiprocessing import Value
 import ctypes
 
 
-BATCH_SIZE = 8
-WORKERS = 64
+BATCH_SIZE = 32
+WORKERS = 32
 COUNT = 100
 
 

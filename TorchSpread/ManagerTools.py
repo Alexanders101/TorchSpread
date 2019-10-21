@@ -9,7 +9,7 @@ from collections import OrderedDict
 
 
 class DistributedModule(nn.Module, ABC):
-    """ Helper class to ensure you remember to but worker as the first parameter. """
+    """ Helper class to ensure you remember to put worker as the first parameter. """
     def __init__(self, worker: bool):
         super(DistributedModule, self).__init__()
         self.worker = worker

@@ -79,6 +79,7 @@ class RequestWorker(Thread):
 
                 current_size += size
 
+            # If we're predicting on the GPU, first load into a temporary batch buffer then load as a batch onto GPU.
             if self.gpu:
                 load_buffer(self.network_input_buffer, self.batch_input_buffer, current_size, 0)
 
@@ -165,6 +166,7 @@ class NetworkWorker(Process):
         # Initialize local copy of the network
         network = config['network_class'](True, *config["network_args"], **config["network_kwargs"])
         network = network.to(device)
+        network.eval()
 
         # Communication Setup
         # ########################################################################################

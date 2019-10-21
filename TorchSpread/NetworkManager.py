@@ -386,10 +386,6 @@ class RequestManager(Process):
         backend = context.socket(zmq.ROUTER)
         backend.bind(relative_channel(self.BACKEND_CHANNEL, self.ipc_dir))
 
-        # Poller for looking to see how many requests have been queue
-        poller = zmq.Poller()
-        poller.register(frontend, zmq.POLLIN)
-
         # We are ready for connections
         self.ready.set()
 
