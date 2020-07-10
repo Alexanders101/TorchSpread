@@ -6,8 +6,11 @@ import os
 from io import BytesIO
 from multiprocessing.reduction import ForkingPickler
 
-from typing import Tuple, List, Union, Dict, Sized, Iterable, Generator, Optional
-BufferType = Union[torch.Tensor, List, Dict]
+from typing import Tuple, List, Union, Dict, Sized, Iterable, Generator, Optional, Any, Hashable
+
+# Recursive definitions not supported yet, so I use Any for the subtypes
+# But the correct type should have BufferType where Any is.
+BufferType = Union[torch.Tensor, List[Any], Dict[Hashable, Any]]
 
 DEBUG = False
 VERBOSE = False

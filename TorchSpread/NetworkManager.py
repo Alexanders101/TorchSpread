@@ -6,7 +6,7 @@ import pickle
 from contextlib import contextmanager
 from collections import Counter
 from tempfile import TemporaryDirectory
-from typing import Type, Union, Tuple, Dict, Optional, List
+from typing import Type, Union, Tuple, Dict, Optional, List, Any, Callable
 
 from .NetworkWorker import NetworkWorker
 from .NetworkSynchronization import SynchronizationManager, SyncCommands
@@ -21,12 +21,12 @@ Process = mp_ctx.Process
 
 class NetworkManager:
     def __init__(self,
-                 input_shape: Union[Tuple, List[Tuple], Dict[object, Tuple]],
-                 input_type: Union[torch.dtype, List[torch.dtype], Dict[object, torch.dtype]],
-                 output_shape: Union[Tuple, List[Tuple], Dict[object, Tuple]],
-                 output_type: Union[torch.dtype, List[torch.dtype], Dict[object, torch.dtype]],
+                 input_shape: Union[Tuple, List[Tuple], Dict[Any, Tuple]],
+                 input_type: Union[torch.dtype, List[torch.dtype], Dict[Any, torch.dtype]],
+                 output_shape: Union[Tuple, List[Tuple], Dict[Any, Tuple]],
+                 output_type: Union[torch.dtype, List[torch.dtype], Dict[Any, torch.dtype]],
                  batch_size: int,
-                 network_class: Type,
+                 network_class: Type[nn.Module],
                  network_args: List = None,
                  network_kwargs: Dict = None,
                  placement: Optional[Union[List[str], Dict[str, int]]] = None,
@@ -57,21 +57,23 @@ class NetworkManager:
         output_type: {Tuple, List[Tuple], Dict[Tuple]}
             The type(s) of the output to your network's forward function.
         batch_size: int
-            The maximum batch size for the worker networks. Note that the networks can
+            The maximum batch size to be fed the networks. Note that the networks can
             predict on samples less than the batch size, we simply need to create the input buffers
-            with a given batch size.
+            with a given batch size. If a client wished to predict on a larger set of samples,
+            then they must manually perform batching to match the network batch size.
         network_class: Subclass of torch.nn.Module
             Your network class. Please ensure the forward function has a single input and output. Although these
             inputs and output can be any buffer structure. Furthermore, the first parameter in the __init__
             function has to be 'worker', a variable stating if it is a worker network or the training network.
+            You can use NetworkTools.DistributedModule to ensure compatibility.
         network_args: List
             List of arguments to pass to the network constructor.
         network_kwargs: Dict
             Dictionary of keyword arguments to pass to the network constructor.
         placement: Dict[str, int] or List[str]
             Dictionary mapping a device name to the number of networks on that device or
-            List containing the devices for each network.
-            Defaults to {'cpu': 1}
+            List containing the devices for each network. You may also use NetworkTools.PlacementStrategy
+            to generate these placements with common patterns. Defaults to {'cpu': 1}.
         training_placement: str
             Device name to place the local training network on. Defaults to 'cuda' if
             all of the networks are on the gpu or 'cpu' otherwise.
@@ -79,7 +81,7 @@ class NetworkManager:
             Number of asynchronous buffers allocated for each worker. More buffers allows for more data to be
             copying at the same time. However, these buffers take up space. This is most useful to increase when
             you have a relatively small network with a lot of inputs, meaning you spend most of your time
-            copying data into and out of the network. Default is 2.
+            copying data into and out of the network. Default is 2 buffers.
         """
         # Temporary directory holding all of the communication objects
         self._ipc_dir_base = TemporaryDirectory()
@@ -103,18 +105,18 @@ class NetworkManager:
         self.output_type = output_type
 
         # Create prediction networks
-        self.networks = []
-        self.network_identities = []
-        self.num_networks = 0
+        self.networks: List[NetworkWorker] = []
+        self.network_identities: List[bytes] = []
+        self.num_networks: int = 0
         self._create_networks()
 
         # Create the management processes
         self.request_manager = RequestManager(self.batch_size, self.num_networks, self.network_identities, self.ipc_dir)
-        self.response_manager = ManagerFrontend(self.num_networks, self.ipc_dir)
+        self.frontend_manager = FrontendManager(self.num_networks, self.ipc_dir)
         self.synchronization_manager = SynchronizationManager(self.ipc_dir)
 
         # Local network storage
-        self._local_network = None
+        self._local_network: nn.Module = None
         self._state_dict = None
         self._wrapper = None
         self._network_lock = mp_ctx.Lock()
@@ -160,7 +162,8 @@ class NetworkManager:
         self.shutdown()
 
     @property
-    def network_config(self):
+    def network_config(self) -> Dict[str, Any]:
+        """ This configuration dictionary is passed to network workers on the backend. """
         return {
             "batch_size": self.batch_size,
             "input_shape": self.input_shape,
@@ -173,12 +176,13 @@ class NetworkManager:
             "ipc_dir": self.ipc_dir,
             "num_worker_buffers": self.num_worker_buffers,
             "request_channel": relative_channel(RequestManager.BACKEND_CHANNEL, self.ipc_dir),
-            "response_channel": relative_channel(ManagerFrontend.BACKEND_CHANNEL, self.ipc_dir),
+            "response_channel": relative_channel(FrontendManager.BACKEND_CHANNEL, self.ipc_dir),
             "ready_channel": relative_channel(RequestManager.INTERCOMMUNICATION_CHANNEL, self.ipc_dir)
         }
 
     @property
-    def client_config(self):
+    def client_config(self) -> Dict[str, Any]:
+        """ This configuration dictionary is passed to any remote clients. """
         return {
             "batch_size": self.batch_size,
             "input_shape": self.input_shape,
@@ -199,8 +203,14 @@ class NetworkManager:
         for _ in range(self.num_networks):
             self.synchronization_queue.recv_multipart()
 
-    def synchronize(self):
-        """ Push the current training network weights to the worker networks. """
+    def synchronize(self) -> None:
+        """ Push the current training network weights to the worker networks.
+
+        Notes
+        -----
+        This will update the remove network weights synchronously. Blocks until all of the networks
+        indicate that they are ready.
+        """
         self._check_started()
 
         # Update the shared state dict
@@ -223,7 +233,7 @@ class NetworkManager:
 
     @property
     def state_dict(self):
-        """ Get the current state dict of the training network"""
+        """ Get the current state dict of the training network. """
         self._check_started()
         return self._local_network.state_dict()
 
@@ -232,7 +242,7 @@ class NetworkManager:
     def training_network(self):
         """ Get a synchronized context for the current training network.
 
-        This is meant to be used in a with block. After the context has been closed
+        This is meant to be used in a context 'with' block. After the context is closed
         it will automatically synchronize the network.
         """
         self._check_started()
@@ -252,7 +262,7 @@ class NetworkManager:
             self.synchronize()
 
     @property
-    def unsynchronized_training_network(self):
+    def unsynchronized_training_network(self) -> nn.Module:
         """ Access the raw training network with no automatic synchronization. """
         self._check_started()
         return self._local_network
@@ -261,36 +271,37 @@ class NetworkManager:
         """ Load the state dict into the training network.
 
         This is th unsynchronized version of state dict loading. The worker networks will not
-        be automatically synchronized, which means their weights will not update!
+        be automatically synchronized. This means that while the training network will receive
+        the new weights, the worker network weights will not update!
         """
         self._check_started()
         self._local_network.load_state_dict(state_dict, strict=strict)
 
-    def start(self, training_wrapper: TrainingWrapper = None, verbose: bool = True):
+    def start(self, training_wrapper: TrainingWrapper = None, verbose: bool = True) -> None:
         """ Start the network manager and all of the worker networks.
 
         Parameters
         ----------
         training_wrapper: function mapping (nn.Module, ) -> nn.Module
-            An extra wrapping function applied to the training network. One example use-case of this would be
-            to add data-parallelism to the training network.
+            An extra wrapping function applied to the training network (but not the worker networks).
+            One example use-case of this would be to add data-parallelism to the training network.
         verbose: bool
-            Whether or not to print the phase of launch.
+            Whether or not to print the phases of launch.
         """
         assert not self.started, "Manager should not be started twice"
-        printer = print if verbose else (lambda x: x)
+        printer: Callable[[str], None] = print if verbose else (lambda x: x)
 
         training_wrapper = optional(training_wrapper, TrainingWrapper())
 
         self.request_manager.start()
-        self.response_manager.start()
+        self.frontend_manager.start()
         self.synchronization_manager.start()
 
         printer("Starting Request Manager")
         self.request_manager.ready.wait()
 
         printer("Starting Response Manager")
-        self.response_manager.ready.wait()
+        self.frontend_manager.ready.wait()
 
         printer("Starting Synchronization Manager")
         self.synchronization_manager.ready.wait()
@@ -321,7 +332,8 @@ class NetworkManager:
         self.started = True
         self.synchronize()
 
-    def shutdown(self):
+    def shutdown(self) -> None:
+        """ Shutdown the cluster and all associated networks. """
         self._check_started()
         assert not self.killed, "Manager should not be shutdown twice."
 
@@ -339,7 +351,7 @@ class NetworkManager:
             network.join()
 
         # Manually kill the other two managers. They dont hold any locks or files, so this is fine.
-        send_sigkill(self.response_manager.pid)
+        send_sigkill(self.frontend_manager.pid)
         send_sigkill(self.synchronization_manager.pid)
 
         # We can only be killed once
@@ -347,7 +359,13 @@ class NetworkManager:
 
 
 class RequestManager(Process):
-    """ Main process to batch all incoming prediction requests and load balance the networks. """
+    """ Process to batch all incoming prediction requests and load balance the networks.
+
+    Notes
+    -----
+    This process does not perform the in-memory batches. Those are performed by the workers so that it can be done in
+    parallel. This class simply assigns requests to batches and sends them to the network workers to perform batching.
+    """
     FRONTEND_CHANNEL = "ipc://request_frontend.ipc"
     BACKEND_CHANNEL = "ipc://request_backend.ipc"
     INTERCOMMUNICATION_CHANNEL = "ipc://network_interconnect.ipc"
@@ -438,12 +456,16 @@ class RequestManager(Process):
             backend.send_multipart([network, pickle.dumps(current_batch)])
 
 
-class ManagerFrontend(Process):
+class FrontendManager(Process):
+    """ Main frontend class for interacting with clients. This is essentially a high speed router.
+
+    This class just forwards requests / responses between the backend and their associated clients. """
+
     FRONTEND_CHANNEL = "ipc://response_frontend.ipc"
     BACKEND_CHANNEL = "ipc://response_backend.ipc"
 
     def __init__(self, num_networks: int, ipc_dir: str):
-        super(ManagerFrontend, self).__init__(daemon=True)
+        super(FrontendManager, self).__init__(daemon=True)
 
         self.num_networks = num_networks
         self.ipc_dir = ipc_dir
@@ -452,18 +474,19 @@ class ManagerFrontend(Process):
     def run(self) -> None:
         context = zmq.Context()
 
-        # Frontend channel to send responses to clients
-        # [ResponseManager] -> Done Command -> NetworkClient
+        # Frontend channel to send and receive requests from clients
+        # NetworkClient -> Request Command -> [FrontendManager]
+        # [FrontendManager] -> Done Command -> NetworkClient
         frontend = context.socket(zmq.ROUTER)
         frontend.bind(relative_channel(self.FRONTEND_CHANNEL, self.ipc_dir))
 
-        # Backend channel to send batches to networks
-        # NetworkWorkerResponder -> Done Command -> [ResponseManager]
+        # Backend channel to receive result batches from networks
+        # ResponseWorker -> Done Command -> [FrontendManager]
         response_backend = context.socket(zmq.PULL)
         response_backend.bind(relative_channel(self.BACKEND_CHANNEL, self.ipc_dir))
 
-        # Backend channel to send batches to networks
-        # NetworkWorkerResponder -> Done Command -> [ResponseManager]
+        # Backend channel to send requests to request manager
+        # [FrontendManager] -> Request Command -> RequestManager
         request_backend = context.socket(zmq.PUSH)
         request_backend.connect(relative_channel(RequestManager.FRONTEND_CHANNEL, self.ipc_dir))
 
