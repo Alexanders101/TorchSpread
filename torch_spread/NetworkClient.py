@@ -1,13 +1,14 @@
-import zmq
 import pickle
-import torch
-
+from abc import ABC, abstractmethod
 from typing import Dict, Union, Optional, Any
+
+import torch
+import zmq
 
 from .NetworkManager import FrontendManager
 from .NetworkSynchronization import SyncCommands, SynchronizationManager, relative_channel
-from .utilities import make_buffer, serialize_tensor, serialize_int, slice_buffer, BufferType, serialize_buffer, deserialize_buffer
-from abc import ABC, abstractmethod
+from .utilities import make_buffer, serialize_tensor, serialize_int, slice_buffer, BufferType
+from .utilities import serialize_buffer, deserialize_buffer
 
 
 class ClientBase(ABC):
@@ -127,6 +128,7 @@ class NetworkClient(ClientBase):
         self.request_queue.connect(relative_channel(FrontendManager.FRONTEND_CHANNEL, self.ipc_dir))
 
     def deregister(self) -> None:
+        """ Close this client's prediction session and remove any buffers it created on the manager.  """
         if not self.connected:
             raise AssertionError("Cannot deregister a client that has not been registered")
 
@@ -316,6 +318,28 @@ class RemoteClient(ClientBase):
         self.identity = None
 
     def predict(self, data: Union[int, BufferType]) -> BufferType:
+        """ General prediction function for the client. Determines the correct type of prediction to make
+
+        Parameters
+        ----------
+        data: A buffer of Numpy arrays or torch tensors
+            If data is a Tensor buffer, then we copy the tensor and predict on it
+            If data is a numpy array buffer, we convert the array into a tensor and predict on it.
+
+        Returns
+        -------
+        BufferType
+            A view into the output buffer as a tensor buffer.
+
+        Raises
+        ------
+        AssertionError
+            If there has already been an asynchronous prediction request queued.
+            If this client is not registered.
+        ValueError
+            If the user tries to perform in-place prediction via an integer input.
+            If something went wrong during prediction on the network manager.
+        """
         if isinstance(data, int):
             raise ValueError("RemoteClient does not support in-place prediction.")
 
@@ -331,6 +355,21 @@ class RemoteClient(ClientBase):
             return deserialize_buffer(data)
 
     def predict_async(self, data: Union[int, BufferType]) -> None:
+        """ Launch an asynchronous prediction request. Sends data to the networks and returns.
+
+        Parameters
+        ----------
+        data: A buffer of Numpy arrays or torch tensors
+            See RemoteClient.predict
+
+        Raises
+        ------
+        AssertionError
+            If there has already been an asynchronous prediction request queued.
+            If this client is not registered
+        ValueError
+            If the user tries to perform in-place prediction via an integer input
+        """
         if isinstance(data, int):
             raise ValueError("RemoteClient does not support in-place prediction.")
 
@@ -342,6 +381,21 @@ class RemoteClient(ClientBase):
         self.request_queue.send_multipart([RemoteCommands.PREDICT, serialize_buffer(data)])
 
     def receive_async(self) -> BufferType:
+        """ Wait for the results of of an async prediction call to
+
+        Returns
+        -------
+        BufferType
+            A view into the output buffer as a tensor buffer.
+
+        Raises
+        ------
+        AssertionError
+            If there is no outstanding asynchronous prediction request.
+            If this client is not registered
+        ValueError
+            If something went wrong during prediction on the network manager.
+        """
         assert self.connected, "Worker has tried to predict without registering first."
         assert self.predicting, "Cannot receive a result until launching an asynchronous prediction request."
 

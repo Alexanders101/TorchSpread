@@ -1,0 +1,4 @@
+numpy
+pyzmq
+lz4
+msgpack-python

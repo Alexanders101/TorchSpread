@@ -3,7 +3,7 @@ import itertools
 import torch
 from torch import nn
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Union, Dict
 from collections import OrderedDict
 
@@ -68,6 +68,7 @@ class PlacementStrategy:
 
 
 class TrainingWrapper:
+    """ A wrapper around a torch module to add specific features to training networks but not worker networks. """
     def wrap_network(self, network: nn.Module) -> nn.Module:
         return network
 
@@ -76,6 +77,7 @@ class TrainingWrapper:
 
 
 class DataParallelWrapper(TrainingWrapper):
+    """ Add a pytorch DataParallel around the training network so that it cen be spread across multiple gpus. """
     def __init__(self, device_ids=None, output_device=None, dim=0):
         self.device_ids = device_ids
         self.output_device = output_device
