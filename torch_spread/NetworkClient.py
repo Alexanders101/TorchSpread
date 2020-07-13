@@ -6,10 +6,64 @@ from typing import Dict, Union, Optional, Any
 
 from .NetworkManager import FrontendManager
 from .NetworkSynchronization import SyncCommands, SynchronizationManager, relative_channel
-from .utilities import make_buffer, serialize_tensor, serialize_int, slice_buffer, BufferType
+from .utilities import make_buffer, serialize_tensor, serialize_int, slice_buffer, BufferType, serialize_buffer, deserialize_buffer
+from abc import ABC, abstractmethod
 
 
-class NetworkClient:
+class ClientBase(ABC):
+    def __init__(self, config: Dict[str, Any], batch_size: int):
+        self.config = config
+        self.batch_size = batch_size
+
+        self.identity = None
+        self.predict_size = None
+
+    def __enter__(self):
+        self.register()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.deregister()
+
+    def __call__(self, data):
+        return self.predict(data)
+
+    @property
+    def connected(self) -> bool:
+        """ Is this client as registered with a manager? """
+        return self.identity is not None
+
+    @property
+    def predicting(self) -> bool:
+        """ Does this client have an outstanding asynchronous prediction request? """
+        return self.predict_size is not None
+
+    @abstractmethod
+    def __del__(self):
+        pass
+
+    @abstractmethod
+    def register(self) -> None:
+        pass
+
+    @abstractmethod
+    def deregister(self) -> None:
+        pass
+
+    @abstractmethod
+    def predict(self, data: Union[int, BufferType]) -> BufferType:
+        pass
+
+    @abstractmethod
+    def predict_async(self, data: Union[int, BufferType]) -> None:
+        pass
+
+    @abstractmethod
+    def receive_async(self) -> BufferType:
+        pass
+
+
+class NetworkClient(ClientBase):
     def __init__(self, config: Dict[str, Any], batch_size: int):
         """ Primary management class for any remote clients that use the network manager.
 
@@ -34,16 +88,16 @@ class NetworkClient:
 
         See Also
         --------
-        TorchSpread.NetworkManager.NetworkManager.client_config
+        torch_spread.NetworkManager.NetworkManager.client_config
         """
+        super(NetworkClient, self).__init__(config, batch_size)
+
         assert batch_size <= config['batch_size'], "Client batch size is greater than manager batch size."
 
-        self.config = config
         self.ipc_dir = config['ipc_dir']
         self.device = 'shared'
 
         # Create this client's buffers
-        self.batch_size = batch_size
         self.input_buffer = make_buffer(batch_size, config["input_shape"], config["input_type"], self.device)
         self.output_buffer = make_buffer(batch_size, config["output_shape"], config["output_type"], self.device)
 
@@ -54,8 +108,9 @@ class NetworkClient:
         self.synchronization_queue.connect(relative_channel(SynchronizationManager.SYNC_FRONTEND_CHANNEL, self.ipc_dir))
         self.request_queue = self.context.socket(zmq.DEALER)
 
-        self.identity = None
-        self.predict_size = None
+    def __del__(self):
+        if self.identity is not None:
+            self.synchronization_queue.send_multipart([SyncCommands.DEREGISTER, self.identity])
 
     def register(self) -> None:
         """ Initialize the prediction session for this client. This is likely not supposed to be used explicitly. """
@@ -80,20 +135,6 @@ class NetworkClient:
             self.synchronization_queue.recv_multipart()
 
         self.identity = None
-
-    def __enter__(self) -> "NetworkClient":
-        self.register()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.deregister()
-
-    def __del__(self):
-        if self.identity is not None:
-            self.synchronization_queue.send_multipart([SyncCommands.DEREGISTER, self.identity])
-
-    def __call__(self, data):
-        return self.predict(data)
 
     def _load_input_buffer(self, data: BufferType, input_buffer: Optional[BufferType] = None) -> int:
         """ Copy over any buffer into the client's shared buffer with the manager.
@@ -131,16 +172,6 @@ class NetworkClient:
             size = data.size(0)
             input_buffer[:size].copy_(data)
             return size
-
-    @property
-    def connected(self) -> bool:
-        """ Is this client as registered with a manager? """
-        return self.identity is not None
-
-    @property
-    def predicting(self) -> bool:
-        """ Does this client have an outstanding asynchronous prediction request? """
-        return self.predict_size is not None
 
     def predict_inplace_async(self, size: Optional[int] = None) -> None:
         assert self.connected, "Worker has tried to predict without registering first."
@@ -234,3 +265,91 @@ class NetworkClient:
         predict_size = self.predict_size
         self.predict_size = None
         return slice_buffer(self.output_buffer, 0, predict_size)
+
+
+# This class has to be here to avoid circular imports
+class RemoteCommands:
+    REGISTER = b'R'
+    DEREGISTER = b'D'
+    ERROR = b'E'
+    PREDICT = b'P'
+
+    KILL = b'K'
+
+
+class RemoteClient(ClientBase):
+    def __init__(self, config: Dict[str, Any], batch_size: int, hostname: str, port: int):
+        super(RemoteClient, self).__init__(config, batch_size)
+
+        self.hostname = hostname
+        self.port = port
+
+        self.context = zmq.Context()
+        self.request_queue = self.context.socket(zmq.REQ)
+
+    def __del__(self):
+        if self.connected:
+            self.request_queue.send_multipart([RemoteCommands.DEREGISTER, self.identity])
+
+    def register(self) -> None:
+        if self.connected:
+            raise AssertionError("Cannot register a client twice.")
+
+        self.request_queue.connect(f"tcp://{self.hostname}:{self.port}")
+        self.request_queue.send_multipart([RemoteCommands.REGISTER, serialize_int(self.batch_size)])
+        result, self.identity = self.request_queue.recv_multipart()
+
+        if result == RemoteCommands.ERROR:
+            self.identity = None
+            raise ConnectionError(f"Failed to register: {self.identity}")
+
+    def deregister(self) -> None:
+        if not self.connected:
+            raise AssertionError("Cannot deregister a client that has not been registered")
+
+        self.request_queue.send_multipart([RemoteCommands.DEREGISTER, self.identity])
+        result, data = self.request_queue.recv_multipart()
+
+        if result == RemoteCommands.ERROR:
+            raise ConnectionError(f"Failed to deregister: {data}")
+
+        self.identity = None
+
+    def predict(self, data: Union[int, BufferType]) -> BufferType:
+        if isinstance(data, int):
+            raise ValueError("RemoteClient does not support in-place prediction.")
+
+        assert self.connected, "Worker has tried to predict without registering first."
+        assert not self.predicting, "Cannot request a synchronous prediction if an async prediction has been queued"
+
+        self.request_queue.send_multipart([RemoteCommands.PREDICT, serialize_buffer(data)])
+        response, data = self.request_queue.recv_multipart()
+
+        if response == RemoteCommands.ERROR:
+            raise ValueError(data)
+        else:
+            return deserialize_buffer(data)
+
+    def predict_async(self, data: Union[int, BufferType]) -> None:
+        if isinstance(data, int):
+            raise ValueError("RemoteClient does not support in-place prediction.")
+
+        assert self.connected, "Worker has tried to predict without registering first."
+        assert not self.predicting, "Cannot launch two asynchronous prediction requests at once. " \
+                                    "Must finish one before sending a new one."
+
+        self.predict_size = 1
+        self.request_queue.send_multipart([RemoteCommands.PREDICT, serialize_buffer(data)])
+
+    def receive_async(self) -> BufferType:
+        assert self.connected, "Worker has tried to predict without registering first."
+        assert self.predicting, "Cannot receive a result until launching an asynchronous prediction request."
+
+        response, data = self.request_queue.recv_multipart()
+
+        self.predict_size = None
+
+        if response == RemoteCommands.ERROR:
+            raise ValueError(data)
+        else:
+            return deserialize_buffer(data)

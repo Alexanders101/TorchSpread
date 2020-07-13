@@ -1,4 +1,4 @@
-from TorchSpread import NetworkManager, NetworkClient
+from torch_spread import NetworkManager, NetworkClient
 
 import torch
 from torch import nn

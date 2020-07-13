@@ -11,7 +11,7 @@ from typing import Type, Union, Tuple, Dict, Optional, List, Any, Callable
 from .NetworkWorker import NetworkWorker
 from .NetworkSynchronization import SynchronizationManager, SyncCommands
 from .ManagerTools import TrainingWrapper
-from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
+from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional, serialize_buffer, deserialize_buffer
 
 from torch import multiprocessing, nn
 
@@ -31,6 +31,7 @@ class NetworkManager:
                  network_kwargs: Dict = None,
                  placement: Optional[Union[List[str], Dict[str, int]]] = None,
                  training_placement: Optional[str] = None,
+                 remote_manager: Optional[Union[int, str]] = None,
                  num_worker_buffers: int = 2):
         """ Primary manager class for creating a distributed prediction cluster.
 
@@ -77,6 +78,10 @@ class NetworkManager:
         training_placement: str
             Device name to place the local training network on. Defaults to 'cuda' if
             all of the networks are on the gpu or 'cpu' otherwise.
+        remote_manager: int or str, optional
+            If this parameter is provided, this manager will start a remote manager so that remote clients can connect
+            to this machine. If an int is provided, it is treated as a port number and the manager will bind on
+            all hostnames. Alternatively, you may provide a string of the format 'hostname:port'.
         num_worker_buffers: int
             Number of asynchronous buffers allocated for each worker. More buffers allows for more data to be
             copying at the same time. However, these buffers take up space. This is most useful to increase when
@@ -114,6 +119,10 @@ class NetworkManager:
         self.request_manager = RequestManager(self.batch_size, self.num_networks, self.network_identities, self.ipc_dir)
         self.frontend_manager = FrontendManager(self.num_networks, self.ipc_dir)
         self.synchronization_manager = SynchronizationManager(self.ipc_dir)
+
+        # Remote manager must be started during the start procedure instead of the init method
+        self.remote_manager_config = remote_manager
+        self.remote_manager = None
 
         # Local network storage
         self._local_network: nn.Module = None
@@ -238,6 +247,16 @@ class NetworkManager:
         return self._local_network.state_dict()
 
     @property
+    def serialized_state_dict(self):
+        """ Get a serialized version of the state dict to save or send across a network. """
+        return serialize_buffer(self.state_dict)
+
+    @property
+    def compressed_state_dict(self):
+        """ Get a compressed serialized state dict. Useful for large models. """
+        return serialize_buffer(self.state_dict, compress=3)
+
+    @property
     @contextmanager
     def training_network(self):
         """ Get a synchronized context for the current training network.
@@ -260,6 +279,17 @@ class NetworkManager:
         with self._network_lock:
             self._local_network.load_state_dict(state_dict, strict=strict)
             self.synchronize()
+
+    def deserialize_state_dict(self, serialized_state_dict, strict=True):
+        """ Load a serialized state dict into the training network.
+
+        This is the synchronous version of the state dict loading which will automatically synchronize
+        the weights of the worker networks after loading. This will work with either the regular serialized
+        state dict or the compressed state dict.
+
+        """
+        state_dict = deserialize_buffer(serialized_state_dict)
+        self.load_state_dict(state_dict, strict)
 
     @property
     def unsynchronized_training_network(self) -> nn.Module:
@@ -329,6 +359,20 @@ class NetworkManager:
         state_buffers = [serialize_tensor(self._state_dict) for _ in range(self.num_networks)]
         self._send_synchronization_command(SyncCommands.LOAD, pickle.dumps(state_buffers))
 
+        if self.remote_manager_config is not None:
+            # This import has to be included here because otherwise it creates a circular reference
+            from .RemoteManager import RemoteManager
+            if isinstance(self.remote_manager_config, int):
+                hostname = "*"
+                port = self.remote_manager_config
+            else:
+                hostname, port = self.remote_manager_config.split(":")
+
+            printer(f"Starting remote manager on {hostname}:{port}")
+            self.remote_manager = RemoteManager(self.client_config, int(port), hostname)
+            self.remote_manager.start()
+            self.remote_manager.ready.wait()
+
         self.started = True
         self.synchronize()
 
@@ -336,6 +380,10 @@ class NetworkManager:
         """ Shutdown the cluster and all associated networks. """
         self._check_started()
         assert not self.killed, "Manager should not be shutdown twice."
+
+        if self.remote_manager is not None:
+            self.remote_manager.shutdown(self.context)
+            self.remote_manager.join()
 
         # Shutdown the synchronization channels
         self.synchronization_queue.send_multipart([SyncCommands.SHUTDOWN, b''])

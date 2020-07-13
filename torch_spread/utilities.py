@@ -3,8 +3,12 @@ import signal
 import torch
 import os
 
+import numpy as np
 from io import BytesIO
 from multiprocessing.reduction import ForkingPickler
+
+from lz4 import frame
+import msgpack
 
 from typing import Tuple, List, Union, Dict, Sized, Iterable, Generator, Optional, Any, Hashable
 
@@ -109,6 +113,34 @@ def load_buffer(to_buffer: BufferType, from_buffer: BufferType, size: int, start
 
     else:
         to_buffer[start_index:start_index + size].copy_(from_buffer[:size])
+
+
+def load_numpy_buffer(to_buffer: BufferType, from_buffer: BufferType, size: int, start_index: int = 0):
+    """ Copy data from one buffer into another with a given size and offset.
+
+    This function is very similar to load_buffer, but the from_buffer is a numpy buffer instead of a torch buffer.
+
+    Parameters
+    ----------
+    to_buffer : PyTorch Buffer
+        The destination buffer.
+    from_buffer : Numpy Buffer
+        The source buffer. Must have the same structure as the destination buffer.
+    size: int
+        How many elements from each tensor to transfer.
+    start_index: int
+        The offset in the destination buffer from which to start writing.
+    """
+    if isinstance(to_buffer, dict):
+        for key, to_tensor in to_buffer.items():
+            load_numpy_buffer(to_tensor, from_buffer[key], size, start_index)
+
+    elif isinstance(to_buffer, (list, tuple)):
+        for to_tensor, from_tensor in zip(to_buffer, from_buffer):
+            load_numpy_buffer(to_tensor, from_tensor, size, start_index)
+
+    else:
+        to_buffer[start_index:start_index + size].copy_(torch.from_numpy(from_buffer)[:size])
 
 
 def unload_buffer(to_buffer, from_buffer, size: int, start_index: int = 0):
@@ -240,3 +272,128 @@ def optional(variable: Optional[object], default: object):
     """ Optional parameter that is default if None.
     """
     return default if variable is None else variable
+
+
+def _serialize_compressed_buffer(buffer: BufferType, compress: int):
+    if isinstance(buffer, dict):
+        return {key: _serialize_compressed_buffer(val, compress) for key, val in buffer.items()}
+    elif isinstance(buffer, (list, tuple)):
+        return [_serialize_compressed_buffer(val, compress) for val in buffer]
+    elif isinstance(buffer, torch.Tensor):
+        buffer = buffer.numpy()
+
+    pickled = buffer.view(np.uint8).data
+    pickled = frame.compress(pickled, compression_level=compress)
+
+    shape = buffer.shape
+    dtype = buffer.dtype.str
+
+    return dtype, shape, pickled
+
+
+def _serialize_uncompressed_buffer(buffer: BufferType):
+    if isinstance(buffer, dict):
+        return {key: _serialize_uncompressed_buffer(val) for key, val in buffer.items()}
+    elif isinstance(buffer, (list, tuple)):
+        return [_serialize_uncompressed_buffer(val) for val in buffer]
+    elif isinstance(buffer, torch.Tensor):
+        buffer = buffer.numpy()
+
+    pickled = buffer.view(np.uint8).data
+    shape = buffer.shape
+    dtype = buffer.dtype.str
+
+    return dtype, shape, pickled
+
+
+def serialize_buffer(buffer: BufferType, compress: int = -1):
+    if compress < 0:
+        serialized = _serialize_uncompressed_buffer(buffer)
+    else:
+        serialized = _serialize_compressed_buffer(buffer, compress)
+
+    serialized = msgpack.dumps((compress, serialized), use_bin_type=True)
+    return serialized
+
+
+def _deserialize_compressed_buffer(serialized: bytes):
+    if isinstance(serialized, dict):
+        return {key: _deserialize_compressed_buffer(val) for key, val in serialized.items()}
+    elif not isinstance(serialized[0], str):
+        return [_deserialize_compressed_buffer(val) for val in serialized]
+
+    dtype, shape, pickled = serialized
+    array = np.frombuffer(frame.decompress(pickled), np.dtype(dtype)).reshape(shape)
+    return torch.from_numpy(array)
+
+
+def _deserialize_uncompressed_buffer(serialized: bytes):
+    if isinstance(serialized, dict):
+        return {key: _deserialize_uncompressed_buffer(val) for key, val in serialized.items()}
+    elif not isinstance(serialized[0], str):
+        return [_deserialize_uncompressed_buffer(val) for val in serialized]
+
+    dtype, shape, pickled = serialized
+    array = np.frombuffer(pickled, np.dtype(dtype)).reshape(shape)
+    return torch.from_numpy(array)
+
+
+def deserialize_buffer(serialized: bytes):
+    compress, serialized = msgpack.loads(serialized, raw=False, use_list=False)
+    if compress < 0:
+        return _deserialize_uncompressed_buffer(serialized)
+    else:
+        return _deserialize_compressed_buffer(serialized)
+
+
+def _deserialize_compressed_buffer_into(to_buffer: BufferType, serialized: bytes):
+    if isinstance(to_buffer, dict):
+        for key, to_tensor in to_buffer.items():
+            size = _deserialize_compressed_buffer_into(to_tensor, serialized[key])
+        return size
+
+    elif isinstance(to_buffer, (list, tuple)):
+        for to_tensor, from_tensor in zip(to_buffer, serialized):
+            size = _deserialize_compressed_buffer_into(to_tensor, from_tensor)
+        return size
+
+    else:
+        dtype, shape, pickled = serialized
+        from_buffer = np.frombuffer(frame.decompress(pickled), np.dtype(dtype)).reshape(shape)
+        from_buffer = torch.from_numpy(from_buffer)
+
+        size = shape[0]
+        to_buffer[:size].copy_(from_buffer)
+
+        return size
+
+
+def _deserialize_uncompressed_buffer_into(to_buffer: BufferType, serialized: bytes):
+    if isinstance(to_buffer, dict):
+        for key, to_tensor in to_buffer.items():
+            size = _deserialize_uncompressed_buffer_into(to_tensor, serialized[key])
+        return size
+
+    elif isinstance(to_buffer, (list, tuple)):
+        for to_tensor, from_tensor in zip(to_buffer, serialized):
+            size = _deserialize_uncompressed_buffer_into(to_tensor, from_tensor)
+        return size
+
+    else:
+        dtype, shape, pickled = serialized
+        from_buffer = np.frombuffer(pickled, np.dtype(dtype)).reshape(shape)
+        from_buffer = torch.from_numpy(from_buffer)
+
+        size = shape[0]
+        to_buffer[:size].copy_(from_buffer)
+
+        return size
+
+
+def deserialize_buffer_into(to_buffer: BufferType, serialized: bytes):
+    compress, serialized = msgpack.loads(serialized, raw=False, use_list=False)
+    if compress < 0:
+        size = _deserialize_uncompressed_buffer_into(to_buffer, serialized)
+    else:
+        size = _deserialize_compressed_buffer_into(to_buffer, serialized)
+    return size, compress

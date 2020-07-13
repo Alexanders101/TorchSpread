@@ -2,7 +2,7 @@ import torch
 from torch import nn, multiprocessing
 from torch.nn import functional as F
 
-from TorchSpread import NetworkClient, NetworkManager, PlacementStrategy
+from torch_spread import NetworkClient, NetworkManager, PlacementStrategy
 from time import time, sleep
 
 from multiprocessing import Value

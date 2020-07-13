@@ -93,16 +93,21 @@ class SynchronizationWorker(Thread):
         while True:
             identity, command, data = request_queue.recv_multipart()
 
+            # Worker network synchronization
             if command == SyncCommands.SYNC:
                 with self.network_lock:
                     self.network.load_state_dict(self.state_dict)
+            elif command == SyncCommands.LOAD:
+                self.state_dict = deserialize_tensor(pickle.loads(data)[self.network_index])
+
+            # Local client registration
             elif command == SyncCommands.REGISTER:
                 data = deserialize_tensor(pickle.loads(data)[self.network_index])
                 self._register(identity, *data)
             elif command == SyncCommands.DEREGISTER:
                 self._deregister(data)
-            elif command == SyncCommands.LOAD:
-                self.state_dict = deserialize_tensor(pickle.loads(data)[self.network_index])
+
+            # Kill command
             elif command == SyncCommands.SHUTDOWN:
                 self._cleanup()
                 break
