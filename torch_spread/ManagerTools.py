@@ -3,16 +3,22 @@ import itertools
 import torch
 from torch import nn
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import Union, Dict
 from collections import OrderedDict
 
+from .utilities import BufferType
 
-class DistributedModule(nn.Module, ABC):
-    """ Helper class to ensure you remember to put worker as the first parameter. """
+
+class SpreadModule(nn.Module, ABC):
+    """ Helper class to ensure you remember to put worker as the first parameter and your forward function a buffer. """
     def __init__(self, worker: bool):
-        super(DistributedModule, self).__init__()
+        super(SpreadModule, self).__init__()
         self.worker = worker
+
+    @abstractmethod
+    def forward(self, input_buffer: BufferType) -> BufferType:
+        pass
 
 
 class PlacementStrategy:

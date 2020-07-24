@@ -1,20 +1,20 @@
+import os
 import pickle
 import signal
-import torch
-import os
-
-import numpy as np
 from io import BytesIO
+from typing import Tuple, List, Union, Dict, Sized, Iterable, Generator, Optional, Hashable
+
+import msgpack
+import numpy as np
+import torch
+from lz4 import frame
 from multiprocessing.reduction import ForkingPickler
 
-from lz4 import frame
-import msgpack
-
-from typing import Tuple, List, Union, Dict, Sized, Iterable, Generator, Optional, Any, Hashable
-
-# Recursive definitions not supported yet, so I use Any for the subtypes
-# But the correct type should have BufferType where Any is.
-BufferType = Union[torch.Tensor, List[Any], Dict[Hashable, Any]]
+# Recursive definitions not supported yet, so I use Tensor for the subtypes
+# But the correct type should have BufferType where Tensor is.
+BufferType = Union[torch.Tensor, List[torch.Tensor], Dict[Hashable, torch.Tensor]]
+ShapeBufferType = Union[Tuple[int, ...], List[Tuple[int, ...]], Dict[Hashable, Tuple[int, ...]]]
+DtypeBufferType = Union[torch.dtype, List[torch.dtype], Dict[Hashable, torch.dtype]]
 
 DEBUG = False
 VERBOSE = False
@@ -41,177 +41,6 @@ def serialize_tensor(tensor) -> bytes:
 def deserialize_tensor(serialized_tensor: bytes):
     """ Convert back from a serialize tensor. Not that this can only be done once for a given bytestring. """
     return pickle.loads(serialized_tensor)
-
-
-def make_buffer(buffer_size: int, buffer_shape: Union[Dict, List, Tuple], buffer_type: Union[Dict, List, torch.dtype],
-                device: Union[str, torch.device] = 'shared') -> BufferType:
-    """ Create a dynamically structured PyTorch buffer.
-
-    The shape parameter may be a single shape, a list of shapes in order, or a dictionary of named shapes.
-    The types parameter must have the same structure.
-
-    Parameters
-    ----------
-    buffer_size: int
-        Size of the first dimension for each tensor.
-    buffer_shape: {tuple, list, dict}
-        The shape of the other dimensions for each tensor.
-    buffer_type: {tuple, list, dict}
-        The type of each buffer, must have the same structure as buffer_shape
-    device: str
-        Which device to place the buffer on. Supported options are {'cpu', 'shared', 'pin', 'cuda:n'}
-    """
-    # Dictionary of shapes / types
-    if isinstance(buffer_shape, dict):
-        assert isinstance(buffer_type, dict)
-
-        return {
-            name: make_buffer(buffer_size, shape, buffer_type[name], device=device)
-            for name, shape in buffer_shape.items()
-        }
-
-    # List of shapes / types
-    if isinstance(buffer_shape, list):
-        assert isinstance(buffer_shape, list)
-
-        return [make_buffer(buffer_size, shape, type, device=device)
-                for shape, type in zip(buffer_shape, buffer_type)]
-
-    # Single shape / type
-    else:
-        tensor = torch.empty((buffer_size, *buffer_shape), dtype=buffer_type)
-        if device == 'shared':
-            tensor.share_memory_()
-            return tensor
-        elif device == 'pin':
-            return tensor.pin_memory()
-        else:
-            return tensor.to(device)
-
-
-def load_buffer(to_buffer: BufferType, from_buffer: BufferType, size: int, start_index: int = 0):
-    """ Copy data from one buffer into another with a given size and offset.
-
-    Parameters
-    ----------
-    to_buffer : PyTorch Buffer
-        The destination buffer.
-    from_buffer : PyTorch Buffer
-        The source buffer. Must have the same structure as the destination buffer.
-    size: int
-        How many elements from each tensor to transfer.
-    start_index: int
-        The offset in the destination buffer from which to start writing.
-    """
-    if isinstance(to_buffer, dict):
-        for key, to_tensor in to_buffer.items():
-            load_buffer(to_tensor, from_buffer[key], size, start_index)
-
-    elif isinstance(to_buffer, (list, tuple)):
-        for to_tensor, from_tensor in zip(to_buffer, from_buffer):
-            load_buffer(to_tensor, from_tensor, size, start_index)
-
-    else:
-        to_buffer[start_index:start_index + size].copy_(from_buffer[:size])
-
-
-def load_numpy_buffer(to_buffer: BufferType, from_buffer: BufferType, size: int, start_index: int = 0):
-    """ Copy data from one buffer into another with a given size and offset.
-
-    This function is very similar to load_buffer, but the from_buffer is a numpy buffer instead of a torch buffer.
-
-    Parameters
-    ----------
-    to_buffer : PyTorch Buffer
-        The destination buffer.
-    from_buffer : Numpy Buffer
-        The source buffer. Must have the same structure as the destination buffer.
-    size: int
-        How many elements from each tensor to transfer.
-    start_index: int
-        The offset in the destination buffer from which to start writing.
-    """
-    if isinstance(to_buffer, dict):
-        for key, to_tensor in to_buffer.items():
-            load_numpy_buffer(to_tensor, from_buffer[key], size, start_index)
-
-    elif isinstance(to_buffer, (list, tuple)):
-        for to_tensor, from_tensor in zip(to_buffer, from_buffer):
-            load_numpy_buffer(to_tensor, from_tensor, size, start_index)
-
-    else:
-        to_buffer[start_index:start_index + size].copy_(torch.from_numpy(from_buffer)[:size])
-
-
-def unload_buffer(to_buffer, from_buffer, size: int, start_index: int = 0):
-    """ Copy data from one buffer into another with a given size and offset.
-
-    This function is very similar to load_buffer, just start index affects the offset of the source buffer
-    instead of the destination buffer.
-
-    Parameters
-    ----------
-    to_buffer : PyTorch Buffer
-        The destination buffer.
-    from_buffer : PyTorch Buffer
-        The source buffer. Must have the same structure as the destination buffer.
-    size: int
-        How many elements from each tensor to transfer.
-    start_index: int
-        The offset in the source buffer from which to start reading.
-    """
-    if isinstance(to_buffer, dict):
-        for key, to_tensor in to_buffer.items():
-            unload_buffer(to_tensor, from_buffer[key], size, start_index)
-
-    elif isinstance(to_buffer, (list, tuple)):
-        for to_tensor, from_tensor in zip(to_buffer, from_buffer):
-            unload_buffer(to_tensor, from_tensor, size, start_index)
-
-    else:
-        to_buffer[:size].copy_(from_buffer[start_index:start_index + size])
-
-
-def slice_buffer(buffer: BufferType, begin: int = 0, end: int = -1):
-    """ Recursively slice a PyTorch Buffer.
-
-    Parameters
-    ----------
-    buffer: PyTorch Buffer
-        Buffer to slice.
-    begin: int
-        Start index of the slice.
-    end: int
-        End index of the slice.
-
-    Returns
-    -------
-
-    """
-    if isinstance(buffer, dict):
-        return {key: slice_buffer(val, begin, end) for key, val in buffer.items()}
-    elif isinstance(buffer, (list, tuple)):
-        return [slice_buffer(val, begin, end) for val in buffer]
-    else:
-        return buffer[begin:end]
-
-
-def send_buffer(buffer: BufferType, device: str):
-    """ Transfer a buffer to another device.
-
-    Parameters
-    ----------
-    buffer: PyTorch Buffer
-        The buffer to transfer.
-    device: str
-        Target device.
-    """
-    if isinstance(buffer, dict):
-        return {key: send_buffer(val, device) for key, val in buffer.items()}
-    elif isinstance(buffer, (list, tuple)):
-        return [send_buffer(val, device) for val in buffer]
-    else:
-        return buffer.to(device)
 
 
 def send_sigkill(pid: int):

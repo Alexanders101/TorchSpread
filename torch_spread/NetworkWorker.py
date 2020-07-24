@@ -8,8 +8,9 @@ import pickle
 from threading import Thread, Event
 
 from .NetworkSynchronization import SynchronizationWorker
-from .utilities import make_buffer, load_buffer, unload_buffer, VERBOSE, BufferType
-from .utilities import serialize_int, deserialize_int, iterate_window, slice_buffer, send_buffer
+from .utilities import VERBOSE, BufferType
+from .BufferTools import make_buffer, load_buffer, unload_buffer, slice_buffer, send_buffer
+from .utilities import serialize_int, deserialize_int, iterate_window
 
 mp_ctx = multiprocessing.get_context('forkserver')
 Process = mp_ctx.Process

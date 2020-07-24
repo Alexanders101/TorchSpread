@@ -7,7 +7,8 @@ import zmq
 
 from .NetworkManager import FrontendManager
 from .NetworkSynchronization import SyncCommands, SynchronizationManager, relative_channel
-from .utilities import make_buffer, serialize_tensor, serialize_int, slice_buffer, BufferType
+from .utilities import serialize_tensor, serialize_int, BufferType
+from .BufferTools import make_buffer, slice_buffer, raw_buffer
 from .utilities import serialize_buffer, deserialize_buffer
 
 
@@ -153,19 +154,14 @@ class NetworkClient(ClientBase):
         int
             Batch size of the created buffer
         """
-        size = 0
         if input_buffer is None:
             input_buffer = self.input_buffer
 
         if isinstance(data, dict):
-            for key, tensor in data.items():
-                size = self._load_input_buffer(tensor, input_buffer[key])
-            return size
+            return max(self._load_input_buffer(tensor, input_buffer[key]) for key, tensor in data.items())
 
         elif isinstance(data, (list, tuple)):
-            for tensor, buffer in zip(data, input_buffer):
-                size = self._load_input_buffer(tensor, buffer)
-            return size
+            return max(self._load_input_buffer(tensor, buffer) for tensor, buffer in zip(data, input_buffer))
 
         else:
             if not torch.is_tensor(data):
@@ -220,7 +216,7 @@ class NetworkClient(ClientBase):
         if isinstance(data, int):
             size = data
         else:
-            size = self._load_input_buffer(data)
+            size = self._load_input_buffer(raw_buffer(data))
 
         return self.predict_inplace(size)
 
@@ -243,7 +239,7 @@ class NetworkClient(ClientBase):
         if isinstance(data, int):
             size = data
         else:
-            size = self._load_input_buffer(data)
+            size = self._load_input_buffer(raw_buffer(data))
 
         self.predict_inplace_async(size)
 
@@ -346,6 +342,7 @@ class RemoteClient(ClientBase):
         assert self.connected, "Worker has tried to predict without registering first."
         assert not self.predicting, "Cannot request a synchronous prediction if an async prediction has been queued"
 
+        data = raw_buffer(data)
         self.request_queue.send_multipart([RemoteCommands.PREDICT, serialize_buffer(data)])
         response, data = self.request_queue.recv_multipart()
 
@@ -377,6 +374,7 @@ class RemoteClient(ClientBase):
         assert not self.predicting, "Cannot launch two asynchronous prediction requests at once. " \
                                     "Must finish one before sending a new one."
 
+        data = raw_buffer(data)
         self.predict_size = 1
         self.request_queue.send_multipart([RemoteCommands.PREDICT, serialize_buffer(data)])
 

@@ -11,7 +11,9 @@ from typing import Type, Union, Tuple, Dict, Optional, List, Any, Callable
 from .NetworkWorker import NetworkWorker
 from .NetworkSynchronization import SynchronizationManager, SyncCommands
 from .ManagerTools import TrainingWrapper
-from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional, serialize_buffer, deserialize_buffer
+from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
+from .BufferTools import make_buffer_shape_type
+from .utilities import serialize_buffer, deserialize_buffer, ShapeBufferType, DtypeBufferType
 
 from torch import multiprocessing, nn
 
@@ -21,10 +23,10 @@ Process = mp_ctx.Process
 
 class NetworkManager:
     def __init__(self,
-                 input_shape: Union[Tuple, List[Tuple], Dict[Any, Tuple]],
-                 input_type: Union[torch.dtype, List[torch.dtype], Dict[Any, torch.dtype]],
-                 output_shape: Union[Tuple, List[Tuple], Dict[Any, Tuple]],
-                 output_type: Union[torch.dtype, List[torch.dtype], Dict[Any, torch.dtype]],
+                 input_shape: Union[int, ShapeBufferType],
+                 input_type: Optional[DtypeBufferType],
+                 output_shape: Union[int, ShapeBufferType],
+                 output_type: Optional[DtypeBufferType],
                  batch_size: int,
                  network_class: Type[nn.Module],
                  network_args: List = None,
@@ -49,24 +51,28 @@ class NetworkManager:
 
         Parameters
         ----------
-        input_shape: {Tuple, List[Tuple], Dict[Tuple]}
+        input_shape: int or BufferShape
             The shape(s) of the input to your network's forward function.
-        input_type: {Tuple, List[Tuple], Dict[Tuple]}
+            An int will be assumed as single dimensional tensor with a given length.
+        input_type: Optional[{Tuple, List[Tuple], Dict[Tuple]}]
             The type(s) of the input to your network's forward function.
-        output_shape: {Tuple, List[Tuple], Dict[Tuple]}
+            `None` will create a buffer with the same structure as input_shape and torch.float32 for all tensors.
+        output_shape: int or BufferShape
             The shape(s) of the output to your network's forward function.
+            An int will be assumed as single dimensional tensor with a given length.
         output_type: {Tuple, List[Tuple], Dict[Tuple]}
             The type(s) of the output to your network's forward function.
+            `None` will create a buffer with the same structure as output_shape and torch.float32 for all tensors.
         batch_size: int
             The maximum batch size to be fed the networks. Note that the networks can
             predict on samples less than the batch size, we simply need to create the input buffers
-            with a given batch size. If a client wished to predict on a larger set of samples,
+            with a given batch size. If a client wants to predict on a larger set of samples,
             then they must manually perform batching to match the network batch size.
         network_class: Subclass of torch.nn.Module
             Your network class. Please ensure the forward function has a single input and output. Although these
             inputs and output can be any buffer structure. Furthermore, the first parameter in the __init__
             function has to be 'worker', a variable stating if it is a worker network or the training network.
-            You can use NetworkTools.DistributedModule to ensure compatibility.
+            You can use NetworkTools.SpreadModule to ensure compatibility.
         network_args: List
             List of arguments to pass to the network constructor.
         network_kwargs: Dict
@@ -104,10 +110,8 @@ class NetworkManager:
         self.network_kwargs = optional(network_kwargs, default={})
 
         # Buffer information
-        self.input_shape = input_shape
-        self.input_type = input_type
-        self.output_shape = output_shape
-        self.output_type = output_type
+        self.input_shape, self.input_type = make_buffer_shape_type(input_shape, input_type)
+        self.output_shape, self.output_type = make_buffer_shape_type(output_shape, output_type)
 
         # Create prediction networks
         self.networks: List[NetworkWorker] = []
@@ -133,6 +137,7 @@ class NetworkManager:
         # Local communication
         self.context = zmq.Context()
         self.synchronization_queue = self.context.socket(zmq.DEALER)
+        self.synchronization_poller = zmq.Poller()
 
         # State objects
         self.started = False
@@ -191,7 +196,7 @@ class NetworkManager:
 
     @property
     def client_config(self) -> Dict[str, Any]:
-        """ This configuration dictionary is passed to any remote clients. """
+        """ This configuration dictionary is passed to any local clients. """
         return {
             "batch_size": self.batch_size,
             "input_shape": self.input_shape,
@@ -207,12 +212,17 @@ class NetworkManager:
         if not self.started:
             raise AssertionError("Manager must be started before performing commands.")
 
-    def _send_synchronization_command(self, command: bytes, data: bytes = b''):
+    def _send_synchronization_command(self, command: bytes, data: bytes = b'', timeout: Optional[int] = None):
         self.synchronization_queue.send_multipart([command, data])
+
+        sockets = dict(self.synchronization_poller.poll(timeout))
+        if self.synchronization_queue not in sockets:
+            raise TimeoutError("Synchronization Timed Out")
+
         for _ in range(self.num_networks):
             self.synchronization_queue.recv_multipart()
 
-    def synchronize(self) -> None:
+    def synchronize(self, timeout: Optional[int] = None) -> None:
         """ Push the current training network weights to the worker networks.
 
         Notes
@@ -229,7 +239,7 @@ class NetworkManager:
             shared_weights[key].copy_(training_weights[key])
 
         # Synchronize Workers
-        self._send_synchronization_command(SyncCommands.SYNC)
+        self._send_synchronization_command(SyncCommands.SYNC, timeout=timeout)
 
     @property
     def training_parameters(self):
@@ -258,18 +268,24 @@ class NetworkManager:
 
     @property
     @contextmanager
-    def training_network(self):
+    def training_network(self, synchronization_timeout: Optional[int] = 1000):
         """ Get a synchronized context for the current training network.
 
         This is meant to be used in a context 'with' block. After the context is closed
         it will automatically synchronize the network.
+
+        Parameters
+        ----------
+        synchronization_timeout: int, optional
+            Timeout, in ms, for the synchronization command after returning for the with block.
+            Useful to ensure that the worker networks are still alive.
         """
         self._check_started()
         with self._network_lock:
             yield self._local_network
-            self.synchronize()
+            self.synchronize(synchronization_timeout)
 
-    def load_state_dict(self, state_dict, strict=True):
+    def load_state_dict(self, state_dict, synchronization_timeout: Optional[int] = 1000, strict: bool = True):
         """ Load a state dict into the training network.
 
         This is the synchronous version of the state dict loading which will
@@ -278,7 +294,7 @@ class NetworkManager:
         self._check_started()
         with self._network_lock:
             self._local_network.load_state_dict(state_dict, strict=strict)
-            self.synchronize()
+            self.synchronize(synchronization_timeout)
 
     def deserialize_state_dict(self, serialized_state_dict, strict=True):
         """ Load a serialized state dict into the training network.
@@ -356,6 +372,7 @@ class NetworkManager:
             parameter.share_memory_()
 
         self.synchronization_queue.connect(relative_channel(SynchronizationManager.SYNC_FRONTEND_CHANNEL, self.ipc_dir))
+        self.synchronization_poller.register(self.synchronization_queue, zmq.POLLIN)
         state_buffers = [serialize_tensor(self._state_dict) for _ in range(self.num_networks)]
         self._send_synchronization_command(SyncCommands.LOAD, pickle.dumps(state_buffers))
 
@@ -383,7 +400,6 @@ class NetworkManager:
 
         if self.remote_manager is not None:
             self.remote_manager.shutdown(self.context)
-            self.remote_manager.join()
 
         # Shutdown the synchronization channels
         self.synchronization_queue.send_multipart([SyncCommands.SHUTDOWN, b''])
@@ -393,14 +409,17 @@ class NetworkManager:
         request_queue.connect(relative_channel(RequestManager.FRONTEND_CHANNEL, self.ipc_dir))
         request_queue.send(RequestManager.SHUTDOWN)
 
-        # Wait for the workers to finish their cleanup
-        self.request_manager.join()
-        for network in self.networks:
-            network.join()
-
         # Manually kill the other two managers. They dont hold any locks or files, so this is fine.
         send_sigkill(self.frontend_manager.pid)
         send_sigkill(self.synchronization_manager.pid)
+
+        # Wait for the workers to finish their cleanup
+        self.request_manager.join(timeout=1)
+        for network in self.networks:
+            network.join(timeout=1)
+
+        if self.remote_manager is not None:
+            self.remote_manager.join(timeout=1)
 
         # We can only be killed once
         self.killed = True
