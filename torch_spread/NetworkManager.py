@@ -3,7 +3,7 @@ import numpy as np
 import zmq
 import zmq.devices
 import torch
-import pickle
+import msgpack
 
 from contextlib import contextmanager
 from collections import Counter
@@ -376,7 +376,7 @@ class NetworkManager:
         self.synchronization_queue.connect(relative_channel(SynchronizationManager.SYNC_FRONTEND_CHANNEL, self.ipc_dir))
         self.synchronization_poller.register(self.synchronization_queue, zmq.POLLIN)
         state_buffers = [serialize_tensor(self._state_dict) for _ in range(self.num_networks)]
-        self._send_synchronization_command(SyncCommands.LOAD, pickle.dumps(state_buffers))
+        self._send_synchronization_command(SyncCommands.LOAD, msgpack.dumps(state_buffers))
 
         if self.remote_manager_config is not None:
             # This import has to be included here because otherwise it creates a circular reference
@@ -453,7 +453,7 @@ class RequestManager(Process):
 
     def _shutdown(self, backend: zmq.Socket):
         for network in self.network_identities:
-            backend.send_multipart([network, pickle.dumps([NetworkWorker.SHUTDOWN])])
+            backend.send_multipart([network, msgpack.dumps([NetworkWorker.SHUTDOWN])])
 
     def run(self) -> None:
         context = zmq.Context()
@@ -501,12 +501,13 @@ class RequestManager(Process):
                     break
 
                 # Shutdown event is just a size one request
-                if len(request) == 1:
+                # In python, trying and failing is faster than asking beforehand...
+                try:
+                    size = deserialize_int(request[1])
+                    new_size = current_size + size
+                except IndexError:
                     self._shutdown(backend)
                     return
-
-                size = deserialize_int(request[1])
-                new_size = current_size + size
 
                 # If we have reached the batch size and have more data, save the request for the next batch
                 if new_size > self.batch_size:
@@ -522,7 +523,7 @@ class RequestManager(Process):
             network = network_queue.recv()
 
             # Send the request
-            backend.send_multipart([network, pickle.dumps(current_batch)])
+            backend.send_multipart([network, msgpack.dumps(current_batch)])
 
 
 class FrontendManager(Process):

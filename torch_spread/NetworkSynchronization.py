@@ -2,7 +2,7 @@ import numpy as np
 
 import torch
 import zmq
-import pickle
+import msgpack
 
 from torch import multiprocessing, nn
 from threading import Thread, Lock, Event
@@ -100,11 +100,11 @@ class SynchronizationWorker(Thread):
                 with self.network_lock:
                     self.network.load_state_dict(self.state_dict)
             elif command == SyncCommands.LOAD:
-                self.state_dict = deserialize_tensor(pickle.loads(data)[self.network_index])
+                self.state_dict = deserialize_tensor(msgpack.loads(data)[self.network_index])
 
             # Local client registration
             elif command == SyncCommands.REGISTER:
-                data = deserialize_tensor(pickle.loads(data)[self.network_index])
+                data = deserialize_tensor(msgpack.loads(data)[self.network_index])
                 self._register(identity, *data)
             elif command == SyncCommands.DEREGISTER:
                 self._deregister(data)

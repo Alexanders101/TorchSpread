@@ -111,11 +111,15 @@ def _serialize_compressed_buffer(buffer: BufferType, compress: int):
     elif isinstance(buffer, torch.Tensor):
         buffer = buffer.numpy()
 
-    pickled = buffer.view(np.uint8).data
-    pickled = frame.compress(pickled, compression_level=compress)
-
     shape = buffer.shape
     dtype = buffer.dtype.str
+
+    if len(shape) > 0:
+        pickled = buffer.view(np.uint8).data
+    else:
+        pickled = buffer.tobytes()
+        
+    pickled = frame.compress(pickled, compression_level=compress)
 
     return dtype, shape, pickled
 
@@ -128,9 +132,13 @@ def _serialize_uncompressed_buffer(buffer: BufferType):
     elif isinstance(buffer, torch.Tensor):
         buffer = buffer.numpy()
 
-    pickled = buffer.view(np.uint8).data
     shape = buffer.shape
     dtype = buffer.dtype.str
+
+    if len(shape) > 0:
+        pickled = buffer.view(np.uint8).data
+    else:
+        pickled = buffer.tobytes()
 
     return dtype, shape, pickled
 

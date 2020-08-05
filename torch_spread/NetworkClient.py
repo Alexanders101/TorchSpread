@@ -1,7 +1,7 @@
-import pickle
 from abc import ABC, abstractmethod
 from typing import Dict, Union, Optional, Any
 
+import msgpack
 import torch
 import zmq
 
@@ -121,7 +121,7 @@ class NetworkClient(ClientBase):
 
         num_networks = self.config["num_networks"]
         buffers = [serialize_tensor([self.input_buffer, self.output_buffer]) for _ in range(num_networks)]
-        self.synchronization_queue.send_multipart([SyncCommands.REGISTER, pickle.dumps(buffers)])
+        self.synchronization_queue.send_multipart([SyncCommands.REGISTER, msgpack.dumps(buffers)])
         for _ in range(self.config["num_networks"]):
             network, self.identity = self.synchronization_queue.recv_multipart()
 
