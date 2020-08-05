@@ -1,3 +1,5 @@
+import numpy as np
+
 import zmq
 import zmq.devices
 import torch

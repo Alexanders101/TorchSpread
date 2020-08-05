@@ -130,12 +130,12 @@ class Buffer:
     def __setitem__(self, key, value):
         set_buffer(self.buffer, raw_buffer(value), key)
 
-    def __call__(self, *index):
+    def __call__(self, *index, raw: bool = False):
         if len(index) == 1:
             index = index[0]
             buffer = self.buffer[index]
 
-            if isinstance(buffer, torch.Tensor):
+            if isinstance(buffer, torch.Tensor) or raw:
                 return buffer
 
             else:
