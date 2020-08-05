@@ -32,6 +32,7 @@ class NetworkManager:
                  network_kwargs: Dict = None,
                  placement: Optional[Union[List[str], Dict[str, int]]] = None,
                  training_placement: Optional[str] = None,
+                 training_wrapper: Optional[TrainingWrapper] = None,
                  remote_manager: Optional[Union[int, str]] = None,
                  num_worker_buffers: int = 2):
         """ Primary manager class for creating a distributed prediction cluster.
@@ -83,6 +84,9 @@ class NetworkManager:
         training_placement: str
             Device name to place the local training network on. Defaults to 'cuda' if
             all of the networks are on the gpu or 'cpu' otherwise.
+        training_wrapper: function mapping (nn.Module, ) -> nn.Module
+            An extra wrapping function applied to the training network (but not the worker networks).
+            One example use-case of this would be to add data-parallelism to the training network.
         remote_manager: int or str, optional
             If this parameter is provided, this manager will start a remote manager so that remote clients can connect
             to this machine. If an int is provided, it is treated as a port number and the manager will bind on
@@ -102,6 +106,7 @@ class NetworkManager:
         self.num_worker_buffers = num_worker_buffers
         self.placement = self._create_placement(placement)
         self.training_placement = self._create_training_placement(training_placement)
+        self.training_wrapper = optional(training_wrapper, TrainingWrapper())
 
         # Network class and parameters
         self.network_class = network_class
@@ -130,7 +135,6 @@ class NetworkManager:
         # Local network storage
         self._local_network: nn.Module = None
         self._state_dict = None
-        self._wrapper = None
         self._network_lock = mp_ctx.Lock()
 
         # Local communication
@@ -232,7 +236,7 @@ class NetworkManager:
         self._check_started()
 
         # Update the shared state dict
-        training_weights = self._wrapper.wrap_state_dict(self._local_network.state_dict())
+        training_weights = self.training_wrapper.wrap_state_dict(self._local_network.state_dict())
         shared_weights = self._state_dict
         for key in shared_weights:
             shared_weights[key].copy_(training_weights[key])
@@ -322,21 +326,16 @@ class NetworkManager:
         self._check_started()
         self._local_network.load_state_dict(state_dict, strict=strict)
 
-    def start(self, training_wrapper: TrainingWrapper = None, verbose: bool = True) -> None:
+    def start(self, verbose: bool = True) -> None:
         """ Start the network manager and all of the worker networks.
 
         Parameters
         ----------
-        training_wrapper: function mapping (nn.Module, ) -> nn.Module
-            An extra wrapping function applied to the training network (but not the worker networks).
-            One example use-case of this would be to add data-parallelism to the training network.
         verbose: bool
             Whether or not to print the phases of launch.
         """
         assert not self.started, "Manager should not be started twice"
         printer: Callable[[str], None] = print if verbose else (lambda x: x)
-
-        training_wrapper = optional(training_wrapper, TrainingWrapper())
 
         self.request_manager.start()
         self.frontend_manager.start()
@@ -362,11 +361,10 @@ class NetworkManager:
         self._local_network = self.network_class(False, *self.network_args, **self.network_kwargs)
         self._local_network = self._local_network.to(self.training_placement)
 
-        self._local_network = training_wrapper.wrap_network(self._local_network)
-        self._wrapper = training_wrapper
+        self._local_network = self.training_wrapper.wrap_network(self._local_network)
 
         printer("Synchronizing initial weights")
-        self._state_dict = training_wrapper.wrap_state_dict(self._local_network.state_dict())
+        self._state_dict = self.training_wrapper.wrap_state_dict(self._local_network.state_dict())
         for parameter in self._state_dict.values():
             parameter.share_memory_()
 
