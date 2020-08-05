@@ -7,10 +7,7 @@ import msgpack
 from torch import multiprocessing, nn
 from threading import Thread, Lock, Event
 
-from .utilities import deserialize_tensor, relative_channel
-
-mp_ctx = multiprocessing.get_context('forkserver')
-Process = mp_ctx.Process
+from .utilities import deserialize_tensor, relative_channel, mp_ctx
 
 
 class SyncCommands:
@@ -117,7 +114,7 @@ class SynchronizationWorker(Thread):
             response_queue.send_multipart([SyncCommands.SUCCESS, identity])
 
 
-class SynchronizationManager(Process):
+class SynchronizationManager(mp_ctx.Process):
     SYNC_BACKEND_CHANNEL = SynchronizationWorker.SYNC_BACKEND_CHANNEL
     SYNC_FRONTEND_CHANNEL = SynchronizationWorker.SYNC_FRONTEND_CHANNEL
 

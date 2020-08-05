@@ -1,11 +1,10 @@
 import ctypes
 
 import numpy as np
-from torch.multiprocessing import Lock, Value, Condition
 
 from .BufferTools import make_buffer_shape_type, check_buffer, load_buffer, load_buffer_safe, Buffer, raw_buffer, \
     raw_buffer_and_size
-from .utilities import BufferType, ShapeBufferType, DtypeBufferType
+from .utilities import BufferType, ShapeBufferType, DtypeBufferType, mp_ctx
 
 
 class BufferFixedQueue:
@@ -29,12 +28,12 @@ class BufferFixedQueue:
             If true, then the buffer will be set to 0 originally. If false than it will have arbitrary data.
         """
         self.maxsize = maxsize
-        self.current_index = Value(ctypes.c_int64, lock=False)
+        self.current_index = mp_ctx.Value(ctypes.c_int64, lock=False)
 
         self.buffer_shape, self.buffer_type = make_buffer_shape_type(buffer_shape, buffer_type)
         self.buffer = Buffer(self.buffer_shape, self.buffer_type, maxsize, device='shared', zero=zero)
 
-        self.lock = Lock()
+        self.lock = mp_ctx.Lock()
 
     @property
     def size(self):
@@ -103,15 +102,15 @@ class BufferRing:
             If true, then the buffer will be set to 0 originally. If false than it will have arbitrary data.
         """
         self.maxsize = maxsize
-        self.current_size = Value(ctypes.c_int64, lock=False)
-        self.current_index = Value(ctypes.c_int64, lock=False)
+        self.current_size = mp_ctx.Value(ctypes.c_int64, lock=False)
+        self.current_index = mp_ctx.Value(ctypes.c_int64, lock=False)
 
         self.buffer_shape, self.buffer_type = make_buffer_shape_type(buffer_shape, buffer_type)
         self.buffer = Buffer(self.buffer_shape, self.buffer_type, maxsize, device='shared', zero=zero)
 
         self.indices = np.arange(maxsize)
 
-        self.lock = Lock()
+        self.lock = mp_ctx.Lock()
 
     def reset(self):
         with self.lock:
@@ -170,7 +169,8 @@ class BufferFIFOQueue:
     def __init__(self,
                  buffer_shape: ShapeBufferType,
                  buffer_type: DtypeBufferType,
-                 maxsize: int):
+                 maxsize: int,
+                 zero: bool = True):
         """ A fixed size, shared memory, First-In First-Out queue.
         
         Parameters
@@ -188,13 +188,13 @@ class BufferFIFOQueue:
 
         self.maxsize = maxsize
 
-        self._queue_size = Value(ctypes.c_int64, lock=False)
-        self._write_index = Value(ctypes.c_int64, lock=False)
-        self._read_index = Value(ctypes.c_int64, lock=False)
+        self._queue_size = mp_ctx.Value(ctypes.c_int64, lock=False)
+        self._write_index = mp_ctx.Value(ctypes.c_int64, lock=False)
+        self._read_index = mp_ctx.Value(ctypes.c_int64, lock=False)
 
-        self.mutex = Lock()
-        self.not_empty = Condition(self.mutex)
-        self.not_full = Condition(self.mutex)
+        self.mutex = mp_ctx.Lock()
+        self.not_empty = mp_ctx.Condition(self.mutex)
+        self.not_full = mp_ctx.Condition(self.mutex)
 
     @property
     def size(self):

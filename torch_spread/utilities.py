@@ -10,6 +10,9 @@ import torch
 from lz4 import frame
 from multiprocessing.reduction import ForkingPickler
 
+# Setup fork-server mode for the entire library
+multiprocessing = mp_ctx = torch.multiprocessing.get_context('forkserver')
+
 # Recursive definitions not supported yet, so I use Tensor for the subtypes
 # But the correct type should have BufferType where Tensor is.
 BufferType = Union[torch.Tensor, List[torch.Tensor], Dict[Hashable, torch.Tensor]]

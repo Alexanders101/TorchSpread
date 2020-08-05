@@ -3,13 +3,9 @@ from typing import Dict, List, Any
 
 import zmq
 import zmq.devices
-from torch import multiprocessing
 
 from .NetworkClient import NetworkClient, RemoteCommands
-from .utilities import deserialize_int, deserialize_buffer_into, serialize_buffer
-
-mp_ctx = multiprocessing.get_context('forkserver')
-Process = mp_ctx.Process
+from .utilities import deserialize_int, deserialize_buffer_into, serialize_buffer, mp_ctx
 
 
 class RemoteHandler(Thread):
@@ -76,7 +72,7 @@ class RemoteHandler(Thread):
         return f"inproc://handler_{channel}"
 
 
-class RemoteManager(Process):
+class RemoteManager(mp_ctx.Process):
     HANDLER_RETURN = "inproc://handler_return"
 
     def __init__(self, client_config, port: int = 8765, hostname: str = "*"):

@@ -1,22 +1,15 @@
 import numpy as np
 
-import torch
-from torch import multiprocessing
-
-from typing import Dict, List, Tuple, Union
-from time import time
-
-import zmq
-import msgpack
 from threading import Thread, Event
+from typing import Dict, List, Tuple, Union
+
+import msgpack
+import torch
+import zmq
 
 from .NetworkSynchronization import SynchronizationWorker
-from .utilities import VERBOSE, BufferType
-from .BufferTools import make_buffer, load_buffer, unload_buffer, slice_buffer, send_buffer
-from .utilities import serialize_int, deserialize_int, iterate_window
-
-mp_ctx = multiprocessing.get_context('forkserver')
-Process = mp_ctx.Process
+from .BufferTools import make_buffer, load_buffer, unload_buffer, slice_buffer
+from .utilities import VERBOSE, BufferType, serialize_int, deserialize_int, iterate_window, mp_ctx
 
 # TESTING Print all communication
 debug_print = print if VERBOSE else (lambda x: x)
@@ -99,7 +92,7 @@ class RequestWorker(Thread):
             self.predict_queue.send_multipart([serialize_int(0), serialize_int(0)])
 
 
-class NetworkWorker(Process):
+class NetworkWorker(mp_ctx.Process):
     # Commands
     READY = b"R"
     SHUTDOWN = b"S"

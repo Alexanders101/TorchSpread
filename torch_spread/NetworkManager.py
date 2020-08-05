@@ -2,7 +2,6 @@ import numpy as np
 
 import zmq
 import zmq.devices
-import torch
 import msgpack
 
 from contextlib import contextmanager
@@ -10,17 +9,15 @@ from collections import Counter
 from tempfile import TemporaryDirectory
 from typing import Type, Union, Tuple, Dict, Optional, List, Any, Callable
 
+from torch import nn
+
 from .NetworkWorker import NetworkWorker
 from .NetworkSynchronization import SynchronizationManager, SyncCommands
 from .ManagerTools import TrainingWrapper
-from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
 from .BufferTools import make_buffer_shape_type
+from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
 from .utilities import serialize_buffer, deserialize_buffer, ShapeBufferType, DtypeBufferType
-
-from torch import multiprocessing, nn
-
-mp_ctx = multiprocessing.get_context('forkserver')
-Process = mp_ctx.Process
+from .utilities import mp_ctx
 
 
 class NetworkManager:
@@ -412,8 +409,11 @@ class NetworkManager:
         request_queue.send(RequestManager.SHUTDOWN)
 
         # Manually kill the other two managers. They dont hold any locks or files, so this is fine.
-        send_sigkill(self.frontend_manager.pid)
-        send_sigkill(self.synchronization_manager.pid)
+        try:
+            send_sigkill(self.frontend_manager.pid)
+            send_sigkill(self.synchronization_manager.pid)
+        except ProcessLookupError:
+            pass
 
         # Wait for the workers to finish their cleanup
         self.request_manager.join(timeout=1)
@@ -427,7 +427,7 @@ class NetworkManager:
         self.killed = True
 
 
-class RequestManager(Process):
+class RequestManager(mp_ctx.Process):
     """ Process to batch all incoming prediction requests and load balance the networks.
 
     Notes
@@ -526,7 +526,7 @@ class RequestManager(Process):
             backend.send_multipart([network, msgpack.dumps(current_batch)])
 
 
-class FrontendManager(Process):
+class FrontendManager(mp_ctx.Process):
     """ Main frontend class for interacting with clients. This is essentially a high speed router.
 
     This class just forwards requests / responses between the backend and their associated clients. """
