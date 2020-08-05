@@ -59,16 +59,16 @@ class RequestWorker(Thread):
 
         # Ready for commands
         self.ready.set()
-        t0 = 0.0
+        # t0 = 0.0
         while True:
-            print(f"REQUEST WORKER {self.identity}:{self.index}: {time() - t0}")
+            # print(f"REQUEST WORKER {self.identity}:{self.index}: {time() - t0}")
 
             # Current Buffers
             network_request = []
 
             # Wait for new requests
             client_requests = msgpack.loads(self.request_queue.recv())
-            t0 = time()
+            # t0 = time()
             debug_print("Loader {} received request.".format(self.identity))
 
             # KILL SIGNAL: length 1 request
@@ -205,11 +205,11 @@ class NetworkWorker(Process):
         for thread in request_threads:
             ready_queue.send(thread.identity, flags=zmq.NOBLOCK)
 
-        t0 = 0.0
+        # t0 = 0.0
         while True:
-            print(f"NETWORK WORKER {self.identity}: {time() - t0}")
+            # print(f"NETWORK WORKER {self.identity}: {time() - t0}")
             request_index, request_size = map(deserialize_int, request_queue.recv_multipart())
-            t0 = time()
+            # t0 = time()
             debug_print("Network {} received request of size {}".format(self.identity, request_size))
 
             # KILL SIGNAL: zero request size
@@ -300,12 +300,12 @@ class ResponseWorker(Thread):
         self.request_queue.send(b'')
         self.ready.set()
 
-        t0 = 0.0
+        # t0 = 0.0
         while True:
             # Wait for an output to be ready
-            print(f"RESPONSE WORKER {self.index}: {time() - t0}")
+            # print(f"RESPONSE WORKER {self.index}: {time() - t0}")
             command = self.request_queue.recv()
-            t0 = time()
+            # t0 = time()
             debug_print("Responder {} for {} received response.".format(self.index, self.device))
 
             # KILL SWITCH: Non-empty command
@@ -314,7 +314,7 @@ class ResponseWorker(Thread):
                 break
 
             # Transfer output to CPU as a batch for efficiency
-            self.network_output = send_buffer(self.network_output, 'cpu')
+            # self.network_output = send_buffer(self.network_output, 'cpu')
 
             # Copy the results to the output buffers
             # And inform the client that their request is complete
