@@ -12,7 +12,7 @@ from multiprocessing.reduction import ForkingPickler
 
 # Setup fork-server mode for the entire library
 multiprocessing = mp_ctx = torch.multiprocessing.get_context('forkserver')
-mp_ctx.set_forkserver_preload(["numpy", "torch", "msgpack", "pickle"])
+mp_ctx.set_forkserver_preload(["numpy", "torch", "zmq", "pickle", "msgpack", "lz4"])
 
 # Recursive definitions not supported yet, so I use Tensor for the subtypes
 # But the correct type should have BufferType where Tensor is.
