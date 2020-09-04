@@ -1,5 +1,5 @@
-from .NetworkManager import NetworkManager
-from .ManagerTools import PlacementStrategy, TrainingWrapper, DataParallelWrapper, SpreadModule
-from .NetworkClient import NetworkClient, RemoteClient
-from .BufferTools import Buffer
+from .network_manager import NetworkManager
+from .manager_tools import PlacementStrategy, TrainingWrapper, DataParallelWrapper, SpreadModule
+from .network_client import NetworkClient, RemoteClient
 from .utilities import mp_ctx, multiprocessing
+from .buffer import Buffer

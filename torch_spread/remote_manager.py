@@ -4,7 +4,7 @@ from typing import Dict, List, Any
 import zmq
 import zmq.devices
 
-from .NetworkClient import NetworkClient, RemoteCommands
+from .network_client import NetworkClient, RemoteCommands
 from .utilities import deserialize_int, deserialize_buffer_into, serialize_buffer, mp_ctx
 
 

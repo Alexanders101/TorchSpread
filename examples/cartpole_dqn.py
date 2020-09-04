@@ -13,9 +13,9 @@ from torch import nn
 from torch.multiprocessing import JoinableQueue, Process, Value
 from torch.nn import functional as F
 
-from torch_spread import NetworkClient, NetworkManager, SpreadModule
-from torch_spread.BufferQueue import BufferRing
-from torch_spread.BufferTools import Buffer, raw_buffer_and_size
+from torch_spread import NetworkClient, NetworkManager, SpreadModule, Buffer
+from torch_spread.buffer_queue import BufferRing
+from torch_spread.buffer_tools import raw_buffer_and_size
 
 from argparse import ArgumentParser, Namespace
 from scipy import signal

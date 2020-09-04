@@ -7,16 +7,19 @@ from typing import Tuple, List, Union, Dict, Sized, Iterable, Generator, Optiona
 import msgpack
 import numpy as np
 import torch
+from torch import Tensor
+
 from lz4 import frame
 from multiprocessing.reduction import ForkingPickler
 
 # Setup fork-server mode for the entire library
+# Preload common libraries to speed up loading time
 multiprocessing = mp_ctx = torch.multiprocessing.get_context('forkserver')
 mp_ctx.set_forkserver_preload(["numpy", "torch", "zmq", "pickle", "msgpack", "lz4"])
 
 # Recursive definitions not supported yet, so I use Tensor for the subtypes
 # But the correct type should have BufferType where Tensor is.
-BufferType = Union[torch.Tensor, List[torch.Tensor], Dict[Hashable, torch.Tensor]]
+BufferType = Union[Tensor, List[Tensor], Dict[Hashable, Tensor]]
 ShapeBufferType = Union[Tuple[int, ...], List[Tuple[int, ...]], Dict[Hashable, Tuple[int, ...]]]
 DtypeBufferType = Union[torch.dtype, List[torch.dtype], Dict[Hashable, torch.dtype]]
 
@@ -25,7 +28,7 @@ VERBOSE = False
 
 
 def serialize_int(x: int) -> bytes:
-    """ Efficiently convert a python integer to a serializable bytestring. """
+    """ Efficiently convert a python integer to a serializable byte-string. """
     byte_size = (int.bit_length(x) + 8) // 8
     return int.to_bytes(x, length=byte_size, byteorder='big')
 
@@ -35,14 +38,14 @@ def deserialize_int(b: bytes) -> int:
     return int.from_bytes(b, byteorder='big')
 
 
-def serialize_tensor(tensor) -> bytes:
+def serialize_tensor(tensor: Tensor) -> bytes:
     """ Serialize a tensor by placing it in shared memory. """
     buf = BytesIO()
     ForkingPickler(buf, pickle.HIGHEST_PROTOCOL).dump(tensor)
     return buf.getvalue()
 
 
-def deserialize_tensor(serialized_tensor: bytes):
+def deserialize_tensor(serialized_tensor: bytes) -> Tensor:
     """ Convert back from a serialize tensor. Not that this can only be done once for a given bytestring. """
     return pickle.loads(serialized_tensor)
 

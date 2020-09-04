@@ -4,7 +4,7 @@ import torch
 import zmq
 import msgpack
 
-from torch import multiprocessing, nn
+from torch import nn
 from threading import Thread, Lock, Event
 
 from .utilities import deserialize_tensor, relative_channel, mp_ctx

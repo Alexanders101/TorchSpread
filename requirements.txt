@@ -2,3 +2,4 @@ numpy
 pyzmq
 lz4
 msgpack
+torch

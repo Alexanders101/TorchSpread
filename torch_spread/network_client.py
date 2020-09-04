@@ -5,11 +5,10 @@ import msgpack
 import torch
 import zmq
 
-from .NetworkManager import FrontendManager
-from .NetworkSynchronization import SyncCommands, SynchronizationManager, relative_channel
-from .utilities import serialize_tensor, serialize_int, BufferType
-from .BufferTools import make_buffer, slice_buffer, raw_buffer
-from .utilities import serialize_buffer, deserialize_buffer
+from .network_manager import FrontendManager
+from .buffer_tools import make_buffer, slice_buffer, raw_buffer
+from .network_synchronization import SyncCommands, SynchronizationManager, relative_channel
+from .utilities import serialize_tensor, serialize_int, serialize_buffer, deserialize_buffer, BufferType
 
 
 class ClientBase(ABC):

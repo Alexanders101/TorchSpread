@@ -7,17 +7,18 @@ import msgpack
 from contextlib import contextmanager
 from collections import Counter
 from tempfile import TemporaryDirectory
-from typing import Type, Union, Tuple, Dict, Optional, List, Any, Callable
+from typing import Type, Union, Dict, Optional, List, Any, Callable
 
 from torch import nn
 
-from .NetworkWorker import NetworkWorker
-from .NetworkSynchronization import SynchronizationManager, SyncCommands
-from .ManagerTools import TrainingWrapper
-from .BufferTools import make_buffer_shape_type
-from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
-from .utilities import serialize_buffer, deserialize_buffer, ShapeBufferType, DtypeBufferType
+from .network_worker import NetworkWorker
+from .manager_tools import TrainingWrapper
+from .buffer_tools import make_buffer_shape_type
+from .network_synchronization import SynchronizationManager, SyncCommands
+
 from .utilities import mp_ctx
+from .utilities import serialize_buffer, deserialize_buffer, ShapeBufferType, DtypeBufferType
+from .utilities import deserialize_int, send_sigkill, serialize_tensor, relative_channel, optional
 
 
 class NetworkManager:
@@ -133,8 +134,8 @@ class NetworkManager:
         self.remote_manager = None
 
         # Local network storage
-        self._local_network: nn.Module = None
-        self._state_dict = None
+        self._local_network: Optional[nn.Module] = None
+        self._state_dict: Optional[dict] = None
         self._network_lock = mp_ctx.Lock()
 
         # Local communication
@@ -166,6 +167,20 @@ class NetworkManager:
                 self.networks.append(network)
                 self.network_identities.extend(network.request_worker_identities)
                 self.num_networks += 1
+
+    def _check_started(self):
+        if not self.started:
+            raise AssertionError("Manager must be started before performing commands.")
+
+    def _send_synchronization_command(self, command: bytes, data: bytes = b'', timeout: Optional[int] = None):
+        self.synchronization_queue.send_multipart([command, data])
+
+        sockets = dict(self.synchronization_poller.poll(timeout))
+        if self.synchronization_queue not in sockets:
+            raise TimeoutError("Synchronization Timed Out")
+
+        for _ in range(self.num_networks):
+            self.synchronization_queue.recv_multipart()
 
     def __del__(self):
         if self.started and not self.killed:
@@ -210,20 +225,6 @@ class NetworkManager:
             "network_identities": self.network_identities,
             "ipc_dir": self.ipc_dir
         }
-
-    def _check_started(self):
-        if not self.started:
-            raise AssertionError("Manager must be started before performing commands.")
-
-    def _send_synchronization_command(self, command: bytes, data: bytes = b'', timeout: Optional[int] = None):
-        self.synchronization_queue.send_multipart([command, data])
-
-        sockets = dict(self.synchronization_poller.poll(timeout))
-        if self.synchronization_queue not in sockets:
-            raise TimeoutError("Synchronization Timed Out")
-
-        for _ in range(self.num_networks):
-            self.synchronization_queue.recv_multipart()
 
     def synchronize(self, timeout: Optional[int] = None) -> None:
         """ Push the current training network weights to the worker networks.
@@ -319,7 +320,7 @@ class NetworkManager:
     def unsynchronized_load_state_dict(self, state_dict, strict=True):
         """ Load the state dict into the training network.
 
-        This is th unsynchronized version of state dict loading. The worker networks will not
+        This is the unsynchronized version of state dict loading. The worker networks will not
         be automatically synchronized. This means that while the training network will receive
         the new weights, the worker network weights will not update!
         """
@@ -357,16 +358,15 @@ class NetworkManager:
             printer("Starting Network {} on {}".format(network.identity, network.device))
             network.ready.wait()
 
-        printer("Starting Local Network")
+        printer("Creating Local Network")
         self._local_network = self.network_class(False, *self.network_args, **self.network_kwargs)
         self._local_network = self._local_network.to(self.training_placement)
-
         self._local_network = self.training_wrapper.wrap_network(self._local_network)
 
         printer("Synchronizing initial weights")
         self._state_dict = self.training_wrapper.wrap_state_dict(self._local_network.state_dict())
-        for parameter in self._state_dict.values():
-            parameter.share_memory_()
+        for key, parameter in self._state_dict.items():
+            self._state_dict[key] = parameter.clone().share_memory_()
 
         self.synchronization_queue.connect(relative_channel(SynchronizationManager.SYNC_FRONTEND_CHANNEL, self.ipc_dir))
         self.synchronization_poller.register(self.synchronization_queue, zmq.POLLIN)
@@ -375,7 +375,7 @@ class NetworkManager:
 
         if self.remote_manager_config is not None:
             # This import has to be included here because otherwise it creates a circular reference
-            from .RemoteManager import RemoteManager
+            from .remote_manager import RemoteManager
             if isinstance(self.remote_manager_config, int):
                 hostname = "*"
                 port = self.remote_manager_config

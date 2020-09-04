@@ -7,8 +7,8 @@ import msgpack
 import torch
 import zmq
 
-from .NetworkSynchronization import SynchronizationWorker
-from .BufferTools import make_buffer, load_buffer, unload_buffer, slice_buffer
+from .network_synchronization import SynchronizationWorker
+from .buffer_tools import make_buffer, load_buffer, unload_buffer, slice_buffer
 from .utilities import VERBOSE, BufferType, serialize_int, deserialize_int, iterate_window, mp_ctx
 
 # TESTING Print all communication

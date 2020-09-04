@@ -2,8 +2,10 @@ import ctypes
 
 import numpy as np
 
-from .BufferTools import make_buffer_shape_type, check_buffer, load_buffer, load_buffer_safe, Buffer, raw_buffer, \
-    raw_buffer_and_size
+from .buffer import Buffer
+from .buffer_tools import make_buffer_shape_type, check_buffer, load_buffer, load_buffer_safe
+from .buffer_tools import raw_buffer, raw_buffer_and_size
+
 from .utilities import BufferType, ShapeBufferType, DtypeBufferType, mp_ctx
 
 
@@ -227,7 +229,7 @@ class BufferFIFOQueue:
 
             read_index = self._read_index.value
             read_indices = np.arange(read_index, read_index + batch_size) % self.maxsize
-            item = self.buffer[read_indices].copy()
+            item = self.buffer[read_indices].clone(device='cpu')
 
             self._queue_size.value = size - batch_size
             self._read_index.value = (read_index + batch_size) % self.maxsize
