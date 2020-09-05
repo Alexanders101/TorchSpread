@@ -1,12 +1,13 @@
-from typing import Optional, Union, Callable, Hashable
+from typing import Optional, Union, Callable, Hashable, Tuple
 
+import numpy as np
 import torch
 from torch import Tensor
 
 from .utilities import ShapeBufferType, DtypeBufferType, BufferType
-from .buffer_tools import buffer_map, buffer_safe_dual_map, buffer_multi_map_reduce
+from .buffer_tools import buffer_map, buffer_safe_dual_map, buffer_multi_map_reduce, buffer_size
 from .buffer_tools import make_buffer, load_buffer, make_buffer_shape_type, buffer_fill_information
-from .buffer_tools import zero_buffer, send_buffer, index_buffer, set_buffer, raw_buffer, iterate_buffer
+from .buffer_tools import zero_buffer, send_buffer, index_buffer, set_buffer, iterate_buffer
 
 
 # noinspection SpellCheckingInspection
@@ -416,3 +417,28 @@ class Buffer:
 
     def __iter__(self):
         return iterate_buffer(self.buffer)
+
+
+def raw_buffer(value) -> BufferType:
+    if isinstance(value, Buffer):
+        return value.buffer
+
+    elif isinstance(value, np.ndarray):
+        return torch.from_numpy(value)
+
+    else:
+        return value
+
+
+def raw_buffer_and_size(value, size: int = None) -> Tuple[BufferType, int]:
+    if isinstance(value, Buffer):
+        return value.buffer, value.size
+
+    elif isinstance(value, np.ndarray):
+        return torch.from_numpy(value), value.shape[0]
+
+    elif size is None:
+        return value, buffer_size(value)
+
+    else:
+        return value, size

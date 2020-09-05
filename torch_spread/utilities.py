@@ -241,3 +241,14 @@ def deserialize_buffer_into(to_buffer: BufferType, serialized: bytes):
     else:
         size = _deserialize_compressed_buffer_into(to_buffer, serialized)
     return size, compress
+
+
+class IdentityContextManager:
+    def __call__(self, *args, **kwargs):
+        return self
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass

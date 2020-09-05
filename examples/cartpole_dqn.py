@@ -10,17 +10,18 @@ from threading import Thread
 from typing import Tuple, List
 
 from torch import nn
-from torch.multiprocessing import JoinableQueue, Process, Value
 from torch.nn import functional as F
 
-from torch_spread import NetworkClient, NetworkManager, SpreadModule, Buffer
+from torch_spread import NetworkClient, NetworkManager, SpreadModule, Buffer, mp_ctx
 from torch_spread.buffer_queue import BufferRing
-from torch_spread.buffer_tools import raw_buffer_and_size
+from torch_spread.buffer import raw_buffer_and_size
 
 from argparse import ArgumentParser, Namespace
 from scipy import signal
 
-process_type = Process
+process_type = mp_ctx.Process
+Value = mp_ctx.Value
+JoinableQueue = mp_ctx.JoinableQueue
 # process_type = Thread
 
 
@@ -322,7 +323,7 @@ class EpisodeCollector(process_type):
             request_queue.put(-1)
 
         for collector in collectors:
-            collector.join(timeout=2)
+            collector.join(timeout=None)
 
     @staticmethod
     def collect(request_queue: JoinableQueue, collectors: List["EpisodeCollector"], total_states: int):
@@ -332,7 +333,11 @@ class EpisodeCollector(process_type):
         for _ in range(num_workers):
             request_queue.put(states_per_worker)
 
-        request_queue.join()
+        try:
+            request_queue.join()
+        except KeyboardInterrupt:
+            EpisodeCollector.kill_collectors(request_queue, collectors)
+            raise KeyboardInterrupt
 
         average_reward = sum(collector.average_reward.value for collector in collectors) / num_workers
         total_episodes = sum(collector.total_episodes.value for collector in collectors)
@@ -395,7 +400,7 @@ class EpisodeCollector(process_type):
 def main():
     params = Namespace()
     params.environment_name = "CartPole-v0"
-    params.num_collectors = 32
+    params.num_collectors = 4
 
     params.replay_buffer_size = 200_000
     params.total_episodes = 30_000
@@ -424,7 +429,8 @@ def main():
                              batch_size=params.num_collectors,
                              network_class=DuelingNetwork,
                              network_args=[state_shape, num_actions],
-                             placement={'cuda:0': 1})
+                             placement={'cuda:0': 1},
+                             worker_amp=True)
     with manager:
         optimizer = torch.optim.Adam(manager.training_parameters, lr=0.005)
 

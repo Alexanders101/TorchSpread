@@ -9,7 +9,8 @@ import zmq
 
 from .network_synchronization import SynchronizationWorker
 from .buffer_tools import make_buffer, load_buffer, unload_buffer, slice_buffer
-from .utilities import VERBOSE, BufferType, serialize_int, deserialize_int, iterate_window, mp_ctx
+from .utilities import VERBOSE, IdentityContextManager, BufferType, iterate_window, mp_ctx
+from .utilities import serialize_int, deserialize_int
 
 # TESTING Print all communication
 debug_print = print if VERBOSE else (lambda x: x)
@@ -109,6 +110,7 @@ class NetworkWorker(mp_ctx.Process):
         self.device = device
         self.gpu = 'cuda' in device
         self.ready = mp_ctx.Event()
+        self.amp = torch.cuda.amp.autocast if config["worker_amp"] else IdentityContextManager()
 
     def _start_synchronization_thread(self, network, context):
         ipc_dir = self.config['ipc_dir']
@@ -215,9 +217,8 @@ class NetworkWorker(mp_ctx.Process):
             network_request = network_requests[request_index]
 
             # Predict on the data
-            with network_lock:
-                with torch.no_grad():
-                    network_output = network(slice_buffer(network_input, 0, request_size))
+            with torch.no_grad(), self.amp(), network_lock:
+                network_output = network(slice_buffer(network_input, 0, request_size))
 
             # Inform the Request Manager that we are ready for more requests
             ready_queue.send(request_threads[request_index].identity, flags=zmq.NOBLOCK)

@@ -6,7 +6,8 @@ import torch
 import zmq
 
 from .network_manager import FrontendManager
-from .buffer_tools import make_buffer, slice_buffer, raw_buffer
+from .buffer_tools import make_buffer, slice_buffer
+from .buffer import raw_buffer
 from .network_synchronization import SyncCommands, SynchronizationManager, relative_channel
 from .utilities import serialize_tensor, serialize_int, serialize_buffer, deserialize_buffer, BufferType
 

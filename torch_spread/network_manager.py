@@ -35,7 +35,8 @@ class NetworkManager:
                  training_placement: Optional[str] = None,
                  training_wrapper: Optional[TrainingWrapper] = None,
                  remote_manager: Optional[Union[int, str]] = None,
-                 num_worker_buffers: int = 2):
+                 num_worker_buffers: int = 2,
+                 worker_amp: bool = False):
         """ Primary manager class for creating a distributed prediction cluster.
 
         Notes
@@ -97,6 +98,9 @@ class NetworkManager:
             copying at the same time. However, these buffers take up space. This is most useful to increase when
             you have a relatively small network with a lot of inputs, meaning you spend most of your time
             copying data into and out of the network. Default is 2 buffers.
+        worker_amp: bool
+            New for PyTorch 1.6. Enable automatic mixed-precision for worker networks. No need to scale gradients
+            since they are only used for prediction and not for training.
         """
         # Temporary directory holding all of the communication objects
         self._ipc_dir_base = TemporaryDirectory()
@@ -104,6 +108,7 @@ class NetworkManager:
 
         # Create the mapping of where to place the worker networks
         self.batch_size = batch_size
+        self.worker_amp = worker_amp
         self.num_worker_buffers = num_worker_buffers
         self.placement = self._create_placement(placement)
         self.training_placement = self._create_training_placement(training_placement)
@@ -206,6 +211,7 @@ class NetworkManager:
             "network_args": self.network_args,
             "network_kwargs": self.network_kwargs,
             "ipc_dir": self.ipc_dir,
+            "worker_amp": self.worker_amp,
             "num_worker_buffers": self.num_worker_buffers,
             "request_channel": relative_channel(RequestManager.BACKEND_CHANNEL, self.ipc_dir),
             "response_channel": relative_channel(FrontendManager.BACKEND_CHANNEL, self.ipc_dir),
@@ -237,10 +243,10 @@ class NetworkManager:
         self._check_started()
 
         # Update the shared state dict
-        training_weights = self.training_wrapper.wrap_state_dict(self._local_network.state_dict())
-        shared_weights = self._state_dict
-        for key in shared_weights:
-            shared_weights[key].copy_(training_weights[key])
+        current_training_weights = self.training_wrapper.wrap_state_dict(self._local_network.state_dict())
+        shared_weights_buffer = self._state_dict
+        for key in shared_weights_buffer:
+            shared_weights_buffer[key].copy_(current_training_weights[key])
 
         # Synchronize Workers
         self._send_synchronization_command(SyncCommands.SYNC, timeout=timeout)
@@ -285,9 +291,15 @@ class NetworkManager:
             Useful to ensure that the worker networks are still alive.
         """
         self._check_started()
-        with self._network_lock:
+        self._network_lock.acquire()
+        try:
             yield self._local_network
+        except Exception as exception:
+            raise exception
+        else:
             self.synchronize(synchronization_timeout)
+        finally:
+            self._network_lock.release()
 
     def load_state_dict(self, state_dict, synchronization_timeout: Optional[int] = 1000, strict: bool = True):
         """ Load a state dict into the training network.

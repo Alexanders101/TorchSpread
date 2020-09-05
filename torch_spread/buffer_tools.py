@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .buffer import Buffer
 from .utilities import ShapeBufferType, DtypeBufferType, BufferType
 
 
@@ -360,26 +359,3 @@ def send_buffer(buffer: BufferType, device: str):
         return buffer.to(device)
 
 
-def raw_buffer(value) -> BufferType:
-    if isinstance(value, Buffer):
-        return value.buffer
-
-    elif isinstance(value, np.ndarray):
-        return torch.from_numpy(value)
-
-    else:
-        return value
-
-
-def raw_buffer_and_size(value, size: int = None) -> Tuple[BufferType, int]:
-    if isinstance(value, Buffer):
-        return value.buffer, value.size
-
-    elif isinstance(value, np.ndarray):
-        return torch.from_numpy(value), value.shape[0]
-
-    elif size is None:
-        return value, buffer_size(value)
-
-    else:
-        return value, size

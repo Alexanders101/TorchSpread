@@ -2,9 +2,8 @@ import ctypes
 
 import numpy as np
 
-from .buffer import Buffer
+from .buffer import Buffer, raw_buffer, raw_buffer_and_size
 from .buffer_tools import make_buffer_shape_type, check_buffer, load_buffer, load_buffer_safe
-from .buffer_tools import raw_buffer, raw_buffer_and_size
 
 from .utilities import BufferType, ShapeBufferType, DtypeBufferType, mp_ctx
 
