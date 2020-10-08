@@ -88,7 +88,7 @@ if __name__ == '__main__':
         for worker in workers:
             worker.start()
 
-        for i, worker in enumerate(workers):
+        for i, worker in tqdm(enumerate(workers), total=NUM_WORKERS):
             worker.join()
 
         print("Running Prediction Locally.")

@@ -420,6 +420,14 @@ class NetworkManager:
         request_queue.connect(relative_channel(RequestManager.FRONTEND_CHANNEL, self.ipc_dir))
         request_queue.send(RequestManager.SHUTDOWN)
 
+        # Wait for the workers to finish their cleanup
+        self.request_manager.join(timeout=1)
+        for network in self.networks:
+            network.join(timeout=1)
+
+        if self.remote_manager is not None:
+            self.remote_manager.join(timeout=1)
+
         # Manually kill the other two managers. They dont hold any locks or files, so this is fine.
         try:
             send_sigkill(self.frontend_manager.pid)
@@ -428,14 +436,6 @@ class NetworkManager:
             pass
         except AttributeError:
             pass
-
-        # Wait for the workers to finish their cleanup
-        self.request_manager.join(timeout=1)
-        for network in self.networks:
-            network.join(timeout=1)
-
-        if self.remote_manager is not None:
-            self.remote_manager.join(timeout=1)
 
         # We can only be killed once
         self.killed = True

@@ -110,7 +110,7 @@ class SynchronizationWorker(Thread):
             elif command == SyncCommands.SHUTDOWN:
                 self._cleanup()
                 response_queue.send_multipart([SyncCommands.SUCCESS, identity])
-                return
+                break
 
             response_queue.send_multipart([SyncCommands.SUCCESS, identity])
 
