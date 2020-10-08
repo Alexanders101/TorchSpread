@@ -17,6 +17,10 @@ from multiprocessing.reduction import ForkingPickler
 multiprocessing = mp_ctx = torch.multiprocessing.get_context('forkserver')
 mp_ctx.set_forkserver_preload(["numpy", "torch", "zmq", "pickle", "msgpack", "lz4"])
 
+# Hotswap the process to a thread for debugging
+# from threading import Thread
+# mp_ctx.Process = Thread
+
 # Recursive definitions not supported yet, so I use Tensor for the subtypes
 # But the correct type should have BufferType where Tensor is.
 BufferType = Union[Tensor, List[Tensor], Dict[Hashable, Tensor]]
@@ -40,6 +44,7 @@ def deserialize_int(b: bytes) -> int:
 
 def serialize_tensor(tensor: Tensor) -> bytes:
     """ Serialize a tensor by placing it in shared memory. """
+    # return pickle.dumps(tensor)
     buf = BytesIO()
     ForkingPickler(buf, pickle.HIGHEST_PROTOCOL).dump(tensor)
     return buf.getvalue()

@@ -55,15 +55,11 @@ class RequestWorker(Thread):
         self.ready.set()
         # t0 = 0.0
         while True:
-            # print(f"REQUEST WORKER {self.identity}:{self.index}: {time() - t0}")
-
             # Current Buffers
             network_request = []
 
             # Wait for new requests
             client_requests = msgpack.loads(self.request_queue.recv())
-            # t0 = time()
-            debug_print("Loader {} received request.".format(self.identity))
 
             # KILL SIGNAL: length 1 request
             if len(client_requests) < 2:
@@ -202,10 +198,7 @@ class NetworkWorker(mp_ctx.Process):
 
         # t0 = 0.0
         while True:
-            # print(f"NETWORK WORKER {self.identity}: {time() - t0}")
             request_index, request_size = map(deserialize_int, request_queue.recv_multipart())
-            # t0 = time()
-            debug_print("Network {} received request of size {}".format(self.identity, request_size))
 
             # KILL SIGNAL: zero request size
             if request_size < 1:
@@ -227,14 +220,19 @@ class NetworkWorker(mp_ctx.Process):
             # Send the responses back to the clients
             response_threads[request_index].respond(network_request, network_output)
 
-        # Cleanup after ending
+        # Cleanup after a shutdown event
+        # The network worker passes the shutdown event to the responders and cleans them up
         for thread in response_threads:
             thread.shutdown()
             thread.join()
 
+        # Wait for request worker to finish up.
+        # It shuts itself down after it passes the shutdown command this network worker
         for thread in request_threads:
             thread.join()
 
+        # Wait for synchronization worker to finish up.
+        # It's shutdown command is sent by the network manager.
         synchronization_thread.join()
 
 
@@ -297,15 +295,12 @@ class ResponseWorker(Thread):
         # t0 = 0.0
         while True:
             # Wait for an output to be ready
-            # print(f"RESPONSE WORKER {self.index}: {time() - t0}")
             command = self.request_queue.recv()
-            # t0 = time()
-            debug_print("Responder {} for {} received response.".format(self.index, self.device))
 
             # KILL SWITCH: Non-empty command
             if len(command) > 1:
                 debug_print("Responder {} for {} Shutdown.".format(self.index, self.device))
-                break
+                return
 
             # Transfer output to CPU as a batch for efficiency
             # self.network_output = send_buffer(self.network_output, 'cpu')

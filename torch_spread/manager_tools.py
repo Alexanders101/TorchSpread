@@ -79,7 +79,7 @@ class TrainingWrapper:
         return network
 
     def wrap_state_dict(self, state_dict: Union[Dict, OrderedDict]) -> Union[Dict, OrderedDict]:
-        return state_dict
+        return dict(state_dict)
 
 
 class DataParallelWrapper(TrainingWrapper):

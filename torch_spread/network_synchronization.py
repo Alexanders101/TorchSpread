@@ -109,7 +109,8 @@ class SynchronizationWorker(Thread):
             # Kill command
             elif command == SyncCommands.SHUTDOWN:
                 self._cleanup()
-                break
+                response_queue.send_multipart([SyncCommands.SUCCESS, identity])
+                return
 
             response_queue.send_multipart([SyncCommands.SUCCESS, identity])
 

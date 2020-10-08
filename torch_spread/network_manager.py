@@ -378,10 +378,12 @@ class NetworkManager:
         printer("Synchronizing initial weights")
         self._state_dict = self.training_wrapper.wrap_state_dict(self._local_network.state_dict())
         for key, parameter in self._state_dict.items():
-            self._state_dict[key] = parameter.clone().share_memory_()
+            self._state_dict[key] = parameter.to('cpu', copy=True).share_memory_()
 
         self.synchronization_queue.connect(relative_channel(SynchronizationManager.SYNC_FRONTEND_CHANNEL, self.ipc_dir))
         self.synchronization_poller.register(self.synchronization_queue, zmq.POLLIN)
+
+        # Create state dict buffers. Need one for each network because you can only deserialize each one once.
         state_buffers = [serialize_tensor(self._state_dict) for _ in range(self.num_networks)]
         self._send_synchronization_command(SyncCommands.LOAD, msgpack.dumps(state_buffers))
 
@@ -423,6 +425,8 @@ class NetworkManager:
             send_sigkill(self.frontend_manager.pid)
             send_sigkill(self.synchronization_manager.pid)
         except ProcessLookupError:
+            pass
+        except AttributeError:
             pass
 
         # Wait for the workers to finish their cleanup
